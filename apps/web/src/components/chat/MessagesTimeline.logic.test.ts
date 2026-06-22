@@ -284,7 +284,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "user-1" as never,
             role: "user",
             text: "Write a poem",
-            turnId: null,
+            runId: null,
             createdAt: "2026-01-01T00:00:00Z",
             updatedAt: "2026-01-01T00:00:00Z",
             streaming: false,
@@ -298,7 +298,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-thought" as never,
             role: "assistant",
             text: "I should ground this first.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:10Z",
             updatedAt: "2026-01-01T00:00:11Z",
             streaming: false,
@@ -312,14 +312,14 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-final" as never,
             role: "assistant",
             text: "Here is the poem.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:20Z",
             updatedAt: "2026-01-01T00:00:30Z",
             streaming: false,
           },
         },
       ],
-      expandedTurnIds: new Set(["turn-1" as never]),
+      expandedRunIds: new Set(["turn-1" as never]),
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
@@ -347,7 +347,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-one" as never,
             role: "assistant",
             text: "Earlier response.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:10Z",
             updatedAt: "2026-01-01T00:00:11Z",
             streaming: false,
@@ -361,16 +361,16 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-two" as never,
             role: "assistant",
             text: "Active response.",
-            turnId: "turn-2" as never,
+            runId: "turn-2" as never,
             createdAt: "2026-01-01T00:00:20Z",
             updatedAt: "2026-01-01T00:00:30Z",
             streaming: false,
           },
         },
       ],
-      latestTurn: {
-        turnId: "turn-2" as never,
-        state: "running",
+      latestRun: {
+        runId: "turn-2" as never,
+        status: "running",
         startedAt: "2026-01-01T00:00:19Z",
         completedAt: null,
       },
@@ -391,7 +391,7 @@ describe("deriveMessagesTimelineRows", () => {
 
   it("projects assistant diff summaries and user revert counts onto the affected rows", () => {
     const assistantTurnDiffSummary = {
-      turnId: "turn-1" as never,
+      runId: "turn-1" as never,
       completedAt: "2026-01-01T00:00:30Z",
       assistantMessageId: "assistant-1" as never,
       checkpointTurnCount: 2,
@@ -410,7 +410,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "user-1" as never,
             role: "user",
             text: "Do the thing",
-            turnId: null,
+            runId: null,
             createdAt: "2026-01-01T00:00:00Z",
             updatedAt: "2026-01-01T00:00:00Z",
             streaming: false,
@@ -424,7 +424,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-1" as never,
             role: "assistant",
             text: "Done",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:20Z",
             updatedAt: "2026-01-01T00:00:30Z",
             streaming: false,
@@ -462,7 +462,7 @@ describe("deriveMessagesTimelineRows", () => {
           id: "user-1" as never,
           role: "user" as const,
           text: "Build it",
-          turnId: null,
+          runId: null,
           createdAt: "2026-01-01T00:00:00Z",
           updatedAt: "2026-01-01T00:00:00Z",
           streaming: false,
@@ -476,7 +476,7 @@ describe("deriveMessagesTimelineRows", () => {
           id: "assistant-thought" as never,
           role: "assistant" as const,
           text: "Looking around first.",
-          turnId: "turn-1" as never,
+          runId: "turn-1" as never,
           createdAt: "2026-01-01T00:00:05Z",
           updatedAt: "2026-01-01T00:00:06Z",
           streaming: false,
@@ -489,7 +489,7 @@ describe("deriveMessagesTimelineRows", () => {
         entry: {
           id: "work-1",
           createdAt: "2026-01-01T00:00:08Z",
-          turnId: "turn-1" as never,
+          runId: "turn-1" as never,
           label: "Ran command",
           tone: "tool" as const,
         },
@@ -502,7 +502,7 @@ describe("deriveMessagesTimelineRows", () => {
           id: "assistant-final" as never,
           role: "assistant" as const,
           text: "Done",
-          turnId: "turn-1" as never,
+          runId: "turn-1" as never,
           createdAt: "2026-01-01T00:00:20Z",
           updatedAt: "2026-01-01T00:00:22Z",
           streaming: false,
@@ -522,7 +522,7 @@ describe("deriveMessagesTimelineRows", () => {
       (row): row is Extract<(typeof collapsedRows)[number], { kind: "turn-fold" }> =>
         row.kind === "turn-fold",
     );
-    expect(foldRow?.turnId).toBe("turn-1");
+    expect(foldRow?.runId).toBe("turn-1");
     expect(foldRow?.expanded).toBe(false);
     // User message boundary (00:00:00) → terminal message updatedAt (00:00:22).
     expect(foldRow?.label).toBe("Worked for 22s");
@@ -534,7 +534,7 @@ describe("deriveMessagesTimelineRows", () => {
 
     const expandedRows = deriveMessagesTimelineRows({
       timelineEntries,
-      expandedTurnIds: new Set(["turn-1" as never]),
+      expandedRunIds: new Set(["turn-1" as never]),
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
@@ -568,7 +568,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "user-1" as never,
             role: "user" as const,
             text: "do it once more",
-            turnId: null,
+            runId: null,
             createdAt: "2026-01-01T00:00:00Z",
             updatedAt: "2026-01-01T00:00:00Z",
             streaming: false,
@@ -582,7 +582,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-commentary" as never,
             role: "assistant" as const,
             text: "Kicking off call 1.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:09Z",
             updatedAt: "2026-01-01T00:00:09Z",
             streaming: false,
@@ -595,7 +595,7 @@ describe("deriveMessagesTimelineRows", () => {
           entry: {
             id: "work-1",
             createdAt: "2026-01-01T00:00:12Z",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             label: "Ran command",
             tone: "tool" as const,
           },
@@ -608,7 +608,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "user-2" as never,
             role: "user" as const,
             text: "actually do 15",
-            turnId: null,
+            runId: null,
             createdAt: "2026-01-01T00:00:14Z",
             updatedAt: "2026-01-01T00:00:14Z",
             streaming: false,
@@ -622,16 +622,16 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-next" as never,
             role: "assistant" as const,
             text: "One down — adjusting.",
-            turnId: "turn-2" as never,
+            runId: "turn-2" as never,
             createdAt: "2026-01-01T00:00:17Z",
             updatedAt: "2026-01-01T00:00:17Z",
             streaming: true,
           },
         },
       ],
-      latestTurn: {
-        turnId: "turn-2" as never,
-        state: "running",
+      latestRun: {
+        runId: "turn-2" as never,
+        status: "running",
         startedAt: "2026-01-01T00:00:14Z",
         completedAt: null,
       },
@@ -646,7 +646,7 @@ describe("deriveMessagesTimelineRows", () => {
         row.kind === "turn-fold",
     );
     // User message (00:00:00) → trailing work entry (00:00:12).
-    expect(foldRow?.turnId).toBe("turn-1");
+    expect(foldRow?.runId).toBe("turn-1");
     expect(foldRow?.label).toBe("Worked for 12s");
   });
 
@@ -660,15 +660,15 @@ describe("deriveMessagesTimelineRows", () => {
           entry: {
             id: "work-1",
             createdAt: "2026-01-01T00:00:05Z",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             label: "Ran command",
             tone: "tool" as const,
           },
         },
       ],
-      latestTurn: {
-        turnId: "turn-1" as never,
-        state: "interrupted",
+      latestRun: {
+        runId: "turn-1" as never,
+        status: "interrupted",
         startedAt: "2026-01-01T00:00:00Z",
         completedAt: "2026-01-01T00:00:47Z",
       },
@@ -681,15 +681,88 @@ describe("deriveMessagesTimelineRows", () => {
     expect(rows).toEqual([
       expect.objectContaining({
         kind: "turn-fold",
-        turnId: "turn-1",
+        runId: "turn-1",
         label: "You stopped after 47s",
         expanded: false,
       }),
     ]);
   });
 
+  it("keeps interruption request, intervening work, and result visible in order", () => {
+    const runId = "turn-1" as never;
+    const interruptEvent = (type: "run_interrupt_request" | "run_interrupt_result") => ({
+      position: type === "run_interrupt_request" ? 0 : 2,
+      visibility: "local" as const,
+      sourceThreadId: "thread-1" as never,
+      sourceItemId: `item-${type}` as never,
+      item: {
+        id: `item-${type}`,
+        threadId: "thread-1",
+        runId,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: type === "run_interrupt_request" ? 0 : 2,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: {},
+        type,
+        message: type === "run_interrupt_request" ? "Stopping" : "Stopped",
+      },
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "interrupt-request",
+          kind: "event",
+          createdAt: "2026-01-01T00:00:01Z",
+          projectedItem: interruptEvent("run_interrupt_request") as never,
+        },
+        {
+          id: "work-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:02Z",
+          entry: {
+            id: "work-1",
+            createdAt: "2026-01-01T00:00:02Z",
+            runId,
+            label: "Finishing tool output",
+            tone: "tool",
+          },
+        },
+        {
+          id: "interrupt-result",
+          kind: "event",
+          createdAt: "2026-01-01T00:00:03Z",
+          projectedItem: interruptEvent("run_interrupt_result") as never,
+        },
+      ],
+      latestRun: {
+        runId,
+        status: "interrupted",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:03Z",
+      },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.map((row) => row.id)).toEqual([
+      "interrupt-request",
+      "work-entry",
+      "interrupt-result",
+    ]);
+    expect(rows.some((row) => row.kind === "turn-fold")).toBe(false);
+  });
+
   it("keeps the previous turn folded while a newly sent message awaits its turn", () => {
-    // Right after send, isWorking is true but latestTurn still points at the
+    // Right after send, isWorking is true but latestRun still points at the
     // previous, settled turn — it must stay folded through that window.
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [
@@ -700,7 +773,7 @@ describe("deriveMessagesTimelineRows", () => {
           entry: {
             id: "work-1",
             createdAt: "2026-01-01T00:00:05Z",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             label: "Ran command",
             tone: "tool" as const,
           },
@@ -713,7 +786,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-final" as never,
             role: "assistant",
             text: "Done",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:20Z",
             updatedAt: "2026-01-01T00:00:22Z",
             streaming: false,
@@ -727,16 +800,16 @@ describe("deriveMessagesTimelineRows", () => {
             id: "user-followup" as never,
             role: "user",
             text: "yooo",
-            turnId: null,
+            runId: null,
             createdAt: "2026-01-01T00:01:00Z",
             updatedAt: "2026-01-01T00:01:00Z",
             streaming: false,
           },
         },
       ],
-      latestTurn: {
-        turnId: "turn-1" as never,
-        state: "completed",
+      latestRun: {
+        runId: "turn-1" as never,
+        status: "completed",
         startedAt: "2026-01-01T00:00:00Z",
         completedAt: "2026-01-01T00:00:22Z",
       },
@@ -767,7 +840,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-thought" as never,
             role: "assistant",
             text: "Working on it.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:05Z",
             updatedAt: "2026-01-01T00:00:06Z",
             streaming: false,
@@ -780,15 +853,15 @@ describe("deriveMessagesTimelineRows", () => {
           entry: {
             id: "work-1",
             createdAt: "2026-01-01T00:00:08Z",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             label: "Ran command",
             tone: "tool" as const,
           },
         },
       ],
-      latestTurn: {
-        turnId: "turn-1" as never,
-        state: "running",
+      latestRun: {
+        runId: "turn-1" as never,
+        status: "running",
         startedAt: "2026-01-01T00:00:00Z",
         completedAt: null,
       },
@@ -878,7 +951,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-thought" as never,
             role: "assistant",
             text: "Checking first.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:10Z",
             updatedAt: "2026-01-01T00:00:11Z",
             streaming: false,
@@ -892,14 +965,14 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-final" as never,
             role: "assistant",
             text: "Done.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:20Z",
             updatedAt: "2026-01-01T00:00:30Z",
             streaming: false,
           },
         },
       ],
-      expandedTurnIds: new Set(["turn-1" as never]),
+      expandedRunIds: new Set(["turn-1" as never]),
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
@@ -925,16 +998,16 @@ describe("deriveMessagesTimelineRows", () => {
             id: "assistant-thought" as never,
             role: "assistant",
             text: "Working on it.",
-            turnId: "turn-1" as never,
+            runId: "turn-1" as never,
             createdAt: "2026-01-01T00:00:10Z",
             updatedAt: "2026-01-01T00:00:11Z",
             streaming: false,
           },
         },
       ],
-      latestTurn: {
-        turnId: "turn-1" as never,
-        state: "running",
+      latestRun: {
+        runId: "turn-1" as never,
+        status: "running",
         startedAt: "2026-01-01T00:00:00Z",
         completedAt: null,
       },
@@ -1031,7 +1104,7 @@ describe("computeStableMessagesTimelineRows", () => {
       id: "user-1" as never,
       role: "user" as const,
       text: "First",
-      turnId: null,
+      runId: null,
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
       streaming: false,
@@ -1040,7 +1113,7 @@ describe("computeStableMessagesTimelineRows", () => {
       id: "user-2" as never,
       role: "user" as const,
       text: "Second",
-      turnId: null,
+      runId: null,
       createdAt: "2026-01-01T00:00:10Z",
       updatedAt: "2026-01-01T00:00:10Z",
       streaming: false,
@@ -1136,7 +1209,7 @@ describe("computeStableMessagesTimelineRows", () => {
       id: "user-1" as never,
       role: "user" as const,
       text: "First",
-      turnId: null,
+      runId: null,
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
       streaming: false,
@@ -1145,7 +1218,7 @@ describe("computeStableMessagesTimelineRows", () => {
       id: "user-2" as never,
       role: "user" as const,
       text: "Second",
-      turnId: null,
+      runId: null,
       createdAt: "2026-01-01T00:00:10Z",
       updatedAt: "2026-01-01T00:00:10Z",
       streaming: false,
