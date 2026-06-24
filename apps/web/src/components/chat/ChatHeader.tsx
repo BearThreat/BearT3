@@ -1,34 +1,11 @@
 import {
   type EnvironmentId,
   type EditorId,
-  type ProjectScript,
   type ResolvedKeybindingsConfig,
-  type ThreadId,
 } from "@t3tools/contracts";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import type { ChangeRequestStateLike } from "@t3tools/client-runtime/state/thread-settled";
-import { ChevronDownIcon } from "lucide-react";
-import {
-  memo,
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
-} from "react";
-import GitActionsControl from "../GitActionsControl";
-import { type DraftId } from "~/composerDraftStore";
+import { memo } from "react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { toastManager } from "../ui/toast";
-import ProjectScriptsControl, {
-  type NewProjectScriptInput,
-  type ProjectScriptActionResult,
-} from "../ProjectScriptsControl";
+import { SidebarTrigger } from "../ui/sidebar";
 import { OpenInPicker } from "./OpenInPicker";
 import { useRemoteOpenState, type RemoteOpenMode } from "../../remoteOpen";
 import { usePrimaryEnvironmentId } from "../../state/environments";
@@ -43,12 +20,9 @@ import {
   WorkspaceBreadcrumbSeparator,
 } from "../WorkspaceBreadcrumb";
 import { cn } from "~/lib/utils";
-import { ThreadRelationshipsControl } from "./ThreadRelationshipsControl";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
-  activeThreadId: ThreadId;
-  draftId?: DraftId;
   activeThreadTitle: string;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
@@ -58,11 +32,10 @@ interface ChatHeaderProps {
   activeProjectCwd: string | null;
   activeProjectFaviconPath: string | null;
   openInCwd: string | null;
-  activeProjectScripts: ReadonlyArray<ProjectScript> | undefined;
-  preferredScriptId: string | null;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
+<<<<<<< HEAD
   gitCwd: string | null;
   readonly onOpenPullRequest?: ((number: number) => void) | undefined;
   onNewThreadInProject: () => void;
@@ -73,6 +46,8 @@ interface ChatHeaderProps {
     input: NewProjectScriptInput,
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
+=======
+>>>>>>> abd5cc5ff8 (Map thread panel into title bar and sidebar)
 }
 
 /**
@@ -110,8 +85,6 @@ export function shouldShowOpenInPicker(input: {
 
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
-  activeThreadId,
-  draftId,
   activeThreadTitle,
   isServerThread,
   changeRequestState,
@@ -119,11 +92,10 @@ export const ChatHeader = memo(function ChatHeader({
   activeProjectCwd,
   activeProjectFaviconPath,
   openInCwd,
-  activeProjectScripts,
-  preferredScriptId,
   keybindings,
   availableEditors,
   rightPanelOpen,
+<<<<<<< HEAD
   gitCwd,
   onOpenPullRequest,
   onNewThreadInProject,
@@ -131,6 +103,8 @@ export const ChatHeader = memo(function ChatHeader({
   onAddProjectScript,
   onUpdateProjectScript,
   onDeleteProjectScript,
+=======
+>>>>>>> abd5cc5ff8 (Map thread panel into title bar and sidebar)
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const fileScripts = useT3ProjectFileScripts(
@@ -230,6 +204,7 @@ export const ChatHeader = memo(function ChatHeader({
       className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
       onContextMenu={handleHeaderContextMenu}
     >
+<<<<<<< HEAD
       <WorkspaceBreadcrumb ariaLabel="Thread breadcrumb" className="flex-1">
         {/* The project always leads the header: knowing which project a
             thread lives in is priority zero, and the thread title alone
@@ -306,6 +281,22 @@ export const ChatHeader = memo(function ChatHeader({
                     {activeThreadTitle}
                   </h2>
                 }
+=======
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
+        <SidebarTrigger className="size-7 shrink-0 md:hidden" />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <h2
+                aria-label={activeThreadTitle}
+                className="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
+              >
+                {activeThreadTitle}
+              </h2>
+              <ChevronDownIcon
+                aria-hidden
+                className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/thread-title:opacity-100 group-focus-visible/thread-title:opacity-100"
+>>>>>>> abd5cc5ff8 (Map thread panel into title bar and sidebar)
               />
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
@@ -316,27 +307,9 @@ export const ChatHeader = memo(function ChatHeader({
         data-chat-header-actions
         className={cn(
           "flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3",
-          rightPanelOpen ? "pr-0" : "pr-16",
+          rightPanelOpen ? "pr-10" : "pr-24",
         )}
       >
-        {activeProjectScripts && (
-          <ProjectScriptsControl
-            scripts={activeProjectScripts}
-            fileScripts={fileScripts}
-            keybindings={keybindings}
-            preferredScriptId={preferredScriptId}
-            onRunScript={onRunProjectScript}
-            onAddScript={onAddProjectScript}
-            onUpdateScript={onUpdateProjectScript}
-            onDeleteScript={onDeleteProjectScript}
-          />
-        )}
-        {!draftId ? (
-          <ThreadRelationshipsControl
-            environmentId={activeThreadEnvironmentId}
-            threadId={activeThreadId}
-          />
-        ) : null}
         {showOpenInPicker && (
           <OpenInPicker
             environmentId={activeThreadEnvironmentId}
@@ -345,6 +318,7 @@ export const ChatHeader = memo(function ChatHeader({
             openInCwd={openInCwd}
           />
         )}
+<<<<<<< HEAD
         {activeProjectName && (
           <GitActionsControl
             gitCwd={gitCwd}
@@ -353,6 +327,8 @@ export const ChatHeader = memo(function ChatHeader({
             {...(draftId ? { draftId } : {})}
           />
         )}
+=======
+>>>>>>> abd5cc5ff8 (Map thread panel into title bar and sidebar)
       </div>
     </div>
   );
