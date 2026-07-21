@@ -5,19 +5,8 @@ import {
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
-  shouldPreserveAssistantLineBreaks,
+  resolveTimelineToolPresentation,
 } from "./MessagesTimeline.logic";
-
-describe("shouldPreserveAssistantLineBreaks", () => {
-  it("preserves Claude insight formatting without changing regular markdown", () => {
-    expect(
-      shouldPreserveAssistantLineBreaks(
-        "★ Insight ─────────────────\\nFirst observation\\nSecond observation\\n─────────────────",
-      ),
-    ).toBe(true);
-    expect(shouldPreserveAssistantLineBreaks("A normal\\nmarkdown paragraph")).toBe(false);
-  });
-});
 
 describe("computeMessageDurationStart", () => {
   it("returns message createdAt when there is no preceding user message", () => {
@@ -215,6 +204,33 @@ describe("normalizeCompactToolLabel", () => {
 
   it("removes trailing completion wording from other labels", () => {
     expect(normalizeCompactToolLabel("Read file completed")).toBe("Read file");
+  });
+});
+
+describe("resolveTimelineToolPresentation", () => {
+  it("pretty prints Claude and Cursor T3 MCP tool names", () => {
+    expect(resolveTimelineToolPresentation("mcp__t3-code__t3_thread_read")).toEqual({
+      displayName: "Read a T3 thread",
+      logo: "t3-code",
+    });
+  });
+
+  it("pretty prints Codex T3 MCP tool names", () => {
+    expect(resolveTimelineToolPresentation("t3-code.create_threads")).toEqual({
+      displayName: "Create T3 threads",
+      logo: "t3-code",
+    });
+  });
+
+  it("pretty prints bare T3 MCP toolkit names", () => {
+    expect(resolveTimelineToolPresentation("list_scheduled_tasks")).toEqual({
+      displayName: "List scheduled tasks",
+      logo: "t3-code",
+    });
+  });
+
+  it("keeps unknown MCP tools on the generic renderer path", () => {
+    expect(resolveTimelineToolPresentation("mcp__github__search_issues")).toBeNull();
   });
 });
 
