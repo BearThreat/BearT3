@@ -32,7 +32,6 @@ function renderPendingActions(isRunning: boolean) {
       showPlanFollowUpPrompt: false,
       promptHasText: false,
       isSendBusy: false,
-      sendDisabledReason: null,
       isConnecting: false,
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
@@ -53,7 +52,6 @@ function renderStandaloneStop() {
       showPlanFollowUpPrompt: false,
       promptHasText: false,
       isSendBusy: false,
-      sendDisabledReason: null,
       isConnecting: false,
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
@@ -96,7 +94,6 @@ function renderSendButton() {
       showPlanFollowUpPrompt: false,
       promptHasText: true,
       isSendBusy: false,
-      sendDisabledReason: null,
       isConnecting: false,
       isEnvironmentUnavailable: false,
       isPreparingWorktree: false,
@@ -259,5 +256,48 @@ describe("ComposerPrimaryActions", () => {
 
     expect(markup).toContain('aria-label="Stop generation"');
     expect(markup).not.toContain('aria-label="Send message"');
+  });
+});
+
+const activeTurnProps = {
+  compact: false,
+  pendingAction: null,
+  showPlanFollowUpPrompt: false,
+  promptHasText: false,
+  isSendBusy: false,
+  isConnecting: false,
+  isEnvironmentUnavailable: false,
+  isPreparingWorktree: false,
+  preserveComposerFocusOnPointerDown: false,
+  onPreviousPendingQuestion: () => {},
+  onInterrupt: () => {},
+  onImplementPlanInNewThread: () => {},
+} as const;
+
+describe("active-turn primary action", () => {
+  it("shows stop while the active composer is empty", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ComposerPrimaryActions, {
+        ...activeTurnProps,
+        isRunning: true,
+        hasSendableContent: false,
+      }),
+    );
+
+    expect(markup).toContain('aria-label="Stop generation"');
+    expect(markup).not.toContain("steer active turn");
+  });
+
+  it("replaces stop with send while the active composer has content", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ComposerPrimaryActions, {
+        ...activeTurnProps,
+        isRunning: true,
+        hasSendableContent: true,
+      }),
+    );
+
+    expect(markup).toContain('aria-label="Send message to steer active turn"');
+    expect(markup).not.toContain('aria-label="Stop generation"');
   });
 });
