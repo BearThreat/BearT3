@@ -10,6 +10,13 @@ import * as Result from "effect/Result";
 
 const SESSION_COOKIE_NAME = "t3_session";
 
+export function shouldUseSecureBrowserSessionCookie(
+  environment: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const configured = environment.T3CODE_BROWSER_COOKIE_SECURE?.trim().toLowerCase();
+  return configured === "1" || configured === "true";
+}
+
 /**
  * Cookies are scoped by host but *not* by port, so any two servers that can be
  * live on one hostname at once need separate names — otherwise the second

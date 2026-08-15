@@ -1380,6 +1380,38 @@ html[data-theme-id] [data-chat-header] [data-slot="separator"] {
   background-color: var(--toolbar-border);
 }
 
+/* Bear3t narrow-screen header repair.
+   Keep identity/navigation on the first row and move project actions to a
+   second row so the controls remain tappable instead of overlapping. */
+@media (max-width: 639px) {
+  header[data-chat-header] {
+    position: relative;
+    height: 96px;
+    min-height: 96px;
+    align-items: flex-start;
+    padding-top: 10px;
+  }
+
+  header[data-chat-header] > div:has(> [data-chat-header-actions]) {
+    height: 32px;
+    padding-right: 72px;
+  }
+
+  header[data-chat-header] [data-chat-header-actions] {
+    position: absolute;
+    top: 54px;
+    right: 12px;
+    left: 12px;
+    justify-content: flex-start;
+    gap: 8px;
+    padding-right: 0 !important;
+  }
+
+  [data-slot="toast-viewport"] {
+    --toast-header-offset: 96px;
+  }
+}
+
 /* Chat code blocks join the other code surfaces on the code tokens. The
    default look keeps its secondary/input tints; themed palettes tint those
    surfaces with the accent, which fights syntax highlighting. */

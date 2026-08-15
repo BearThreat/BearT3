@@ -4,7 +4,21 @@ import {
   deriveAuthClientMetadata,
   isRemoteReachableHost,
   resolveSessionCookieName,
+  shouldUseSecureBrowserSessionCookie,
 } from "./utils.ts";
+
+describe("secure browser session cookies", () => {
+  it("enables Secure cookies only through the explicit deployment setting", () => {
+    expect(shouldUseSecureBrowserSessionCookie({})).toBe(false);
+    expect(shouldUseSecureBrowserSessionCookie({ T3CODE_BROWSER_COOKIE_SECURE: "false" })).toBe(
+      false,
+    );
+    expect(shouldUseSecureBrowserSessionCookie({ T3CODE_BROWSER_COOKIE_SECURE: " true " })).toBe(
+      true,
+    );
+    expect(shouldUseSecureBrowserSessionCookie({ T3CODE_BROWSER_COOKIE_SECURE: "1" })).toBe(true);
+  });
+});
 
 describe("deriveAuthClientMetadata", () => {
   it("labels Electron user agents as Electron instead of Chrome", () => {
