@@ -1,8 +1,8 @@
 # T3 Code
 
 > [!NOTE]
-> **Bear3t** is Barrett's public T3 Code fork for reliable private-tailnet operation on phones and
-> narrow desktop windows. See [the Bear3t change and purpose notes](./docs/operations/bear3t.md).
+> **BearT3** is Barrett's public T3 Code fork for reliable private-tailnet operation on phones and
+> narrow desktop windows. See [the BearT3 change and purpose notes](./docs/operations/beart3.md).
 
 T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
 

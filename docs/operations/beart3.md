@@ -1,6 +1,6 @@
-# Bear3t fork purpose and changes
+# BearT3 fork purpose and changes
 
-Bear3t is Barrett's public fork of [T3 Code](https://github.com/pingdotgg/t3code). It preserves
+BearT3 is Barrett's public fork of [T3 Code](https://github.com/pingdotgg/t3code). It preserves
 the upstream product while carrying a small set of reliability changes proven in a private,
 multi-device Tailscale deployment.
 
@@ -55,6 +55,6 @@ For a reverse-proxied deployment, acceptance means:
 
 ## Upstream relationship
 
-Bear3t remains an MIT-licensed fork of T3 Code. Upstream is tracked as
+BearT3 remains an MIT-licensed fork of T3 Code. Upstream is tracked as
 `pingdotgg/t3code`; fork-specific behavior is intentionally small and documented here so future
 upstream syncs can be reviewed cleanly.
