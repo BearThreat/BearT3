@@ -173,13 +173,17 @@ function BrowserViewportSetting({ disabled }: { readonly disabled: boolean }) {
         ) : null
       }
       control={
-        <div className="flex w-full items-center gap-2 sm:w-auto">
+        <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
           <Select
             value={viewportSelectValue(viewport)}
             onValueChange={selectViewport}
             disabled={disabled}
           >
-            <SelectTrigger className="w-full sm:w-44" aria-label="Default browser viewport">
+            <SelectTrigger
+              size="sm"
+              className="w-full min-w-0 sm:w-44"
+              aria-label="Default browser viewport"
+            >
               <SelectValue>{viewportSelectLabel(viewport)}</SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false} className="min-w-64">
@@ -202,7 +206,7 @@ function BrowserViewportSetting({ disabled }: { readonly disabled: boolean }) {
           </Select>
 
           {sized ? (
-            <div className="flex shrink-0 items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1">
               <NumberField
                 value={presentedSize.width}
                 min={PREVIEW_VIEWPORT_MIN_DIMENSION}
@@ -211,7 +215,7 @@ function BrowserViewportSetting({ disabled }: { readonly disabled: boolean }) {
                 // Pixel counts read as raw numbers; grouping would show "1,024".
                 format={NO_GROUPING}
                 size="sm"
-                className="w-24"
+                className="w-20"
                 onValueCommitted={(value) => commitDimension("width", value)}
               >
                 <NumberFieldGroup>
@@ -226,7 +230,7 @@ function BrowserViewportSetting({ disabled }: { readonly disabled: boolean }) {
                 disabled={disabled}
                 format={NO_GROUPING}
                 size="sm"
-                className="w-24"
+                className="w-20"
                 onValueCommitted={(value) => commitDimension("height", value)}
               >
                 <NumberFieldGroup>
@@ -401,7 +405,7 @@ function DesktopOnlyBrowserDefaults({ children }: { readonly children: ReactNode
         <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
         <p>Only available in the desktop app.</p>
       </div>
-      <div className="opacity-64">{children}</div>
+      <div className="[&_h3]:opacity-64 [&_p]:opacity-64">{children}</div>
     </div>
   );
 }
