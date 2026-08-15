@@ -1,4 +1,9 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_PREVIEW_APPEARANCE,
+  DEFAULT_PREVIEW_ZOOM_FACTOR,
+  EnvironmentId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const { closeTab, createTab, stopBrowserRecording } = vi.hoisted(() => ({
@@ -16,6 +21,12 @@ vi.mock("./browserRecording", () => ({
 }));
 
 import { acquireDesktopTab } from "./desktopTabLifetime";
+
+/** Client settings are unset in tests, so creation carries the schema defaults. */
+const DEFAULT_TAB_STATE = {
+  zoomFactor: DEFAULT_PREVIEW_ZOOM_FACTOR,
+  colorScheme: DEFAULT_PREVIEW_APPEARANCE,
+};
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
 
 describe("desktopTabLifetime", () => {
@@ -81,8 +92,8 @@ describe("desktopTabLifetime", () => {
     const second = acquireDesktopTab(tabB);
     await Promise.all([first.ready, second.ready]);
 
-    expect(createTab).toHaveBeenCalledWith(tabA);
-    expect(createTab).toHaveBeenCalledWith(tabB);
+    expect(createTab).toHaveBeenCalledWith(tabA, DEFAULT_TAB_STATE);
+    expect(createTab).toHaveBeenCalledWith(tabB, DEFAULT_TAB_STATE);
     expect(createTab).toHaveBeenCalledTimes(2);
 
     first.release();
