@@ -51,6 +51,21 @@ describe("chatThreadActions", () => {
     expect(projectRef).toEqual(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID));
   });
 
+  it("routes projectless starts to the explicit Unassigned project", () => {
+    const unassignedProjectRef = scopeProjectRef(ENVIRONMENT_ID, FALLBACK_PROJECT_ID);
+    const projectRef = resolveThreadActionProjectRef(
+      createContext({
+        unassignedProjectRef,
+        activeThread: {
+          environmentId: ENVIRONMENT_ID,
+          projectId: PROJECT_ID,
+        },
+      }),
+    );
+
+    expect(projectRef).toEqual(unassignedProjectRef);
+  });
+
   it("falls back to the active draft thread project when there is no active thread", () => {
     const projectRef = resolveThreadActionProjectRef(
       createContext({

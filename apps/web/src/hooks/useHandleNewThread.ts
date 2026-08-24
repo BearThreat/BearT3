@@ -460,12 +460,23 @@ export function useHandleNewThread() {
     });
   }, [projectOrder, projects]);
   const handleNewThread = useNewThreadHandler();
+  const unassignedProject = projects.find(
+    (project) =>
+      project.title.trim().toLocaleLowerCase() === "unassigned" ||
+      project.workspaceRoot
+        .replace(/[\\/]+$/, "")
+        .split(/[\\/]/)
+        .at(-1) === "T3Projects",
+  );
 
   return {
     activeDraftThread,
     activeThread,
     defaultProjectRef: orderedProjects[0]
       ? scopeProjectRef(orderedProjects[0].environmentId, orderedProjects[0].id)
+      : null,
+    unassignedProjectRef: unassignedProject
+      ? scopeProjectRef(unassignedProject.environmentId, unassignedProject.id)
       : null,
     handleNewThread,
     routeThreadRef,

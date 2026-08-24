@@ -106,6 +106,7 @@ import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useThreadShells } from "../state/entities";
+import { useDebouncedValue } from "../state/queries";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
@@ -133,7 +134,6 @@ import {
   resolveSettledTimestamp,
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
-  shouldCreateNewThreadInCurrentProject,
   resolveWorkingStartedAt,
   sortLogicalProjectsForSidebar,
   sortPinnedThreadsForSidebar,
@@ -193,6 +193,10 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Keep the v2 key so existing preferences survive the v2-to-default rename.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:snoozed-expanded";
+// Provider, turn, and background-work receipts can land a few hundred
+// milliseconds apart. Hold only the row order so those transitions collapse
+// into one move; row content and status indicators still update immediately.
+const ACTIVE_THREAD_ORDER_DEBOUNCE_MS = 600;
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -822,23 +826,32 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // working threads aren't your problem yet) — only the colored status label
   // stands out.
   const isInFlight =
-    status === "working" || status === "monitoring" || status === "approval" || status === "input";
+    status === "working" ||
+    status === "recovering" ||
+    status === "monitoring" ||
+    status === "approval" ||
+    status === "input";
   const shouldRecede =
     (status === "ready" || isInFlight) && !isUnread && !isWoke && !props.isActive && !isSelected;
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
   const topStatus =
-    status === "working"
+    status === "working" || status === "recovering"
       ? {
-          label: "Working",
+          label: status === "recovering" ? "Recovering" : "Working",
           icon: "working" as const,
           // No shimmer: a label that animates forever is noise in a sidebar
           // full of them (and repaints every vsync on high-refresh displays).
           // Working is a background state, so it rests at the dim end of what
           // the old pulse cycled through; only the thread you have open gets
           // the label at full strength.
-          className: cn("text-sky-600 dark:text-sky-400", !props.isActive && "opacity-75"),
+          className: cn(
+            status === "recovering"
+              ? "text-cyan-600 dark:text-cyan-400"
+              : "text-sky-600 dark:text-sky-400",
+            !props.isActive && "opacity-75",
+          ),
         }
       : status === "monitoring"
         ? {
@@ -1443,7 +1456,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             wrapper around the ticking duration would make
                             screen readers announce every second. */}
                         <span role="status">{topStatus.label}</span>
-                        {status === "working" ? (
+                        {status === "working" || status === "recovering" ? (
                           <span aria-hidden>
                             <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                           </span>
@@ -2079,9 +2092,28 @@ export default function Sidebar() {
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
+  const activeThreadOrderKey = activeThreads
+    .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
+    .join("\0");
+  const debouncedActiveThreadOrderKey = useDebouncedValue(
+    activeThreadOrderKey,
+    ACTIVE_THREAD_ORDER_DEBOUNCE_MS,
+  );
+  const displayedActiveThreads = useMemo(
+    () =>
+      orderItemsByPreferredIds({
+        items: activeThreads,
+        preferredIds:
+          debouncedActiveThreadOrderKey.length === 0
+            ? []
+            : debouncedActiveThreadOrderKey.split("\0"),
+        getId: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      }),
+    [activeThreads, debouncedActiveThreadOrderKey],
+  );
   const searchableThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...snoozedThreads, ...settledThreads],
-    [activeThreads, pinnedThreads, settledThreads, snoozedThreads],
+    () => [...pinnedThreads, ...displayedActiveThreads, ...snoozedThreads, ...settledThreads],
+    [displayedActiveThreads, pinnedThreads, settledThreads, snoozedThreads],
   );
   const threadSearchResults = useMemo(
     () => searchSidebarThreadsByTitle(searchableThreads, threadSearchQuery),
@@ -2199,8 +2231,13 @@ export default function Sidebar() {
   }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
 
   const orderedThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
-    [pinnedThreads, activeThreads, visibleSnoozedThreads, renderedSettledThreads],
+    () => [
+      ...pinnedThreads,
+      ...displayedActiveThreads,
+      ...visibleSnoozedThreads,
+      ...renderedSettledThreads,
+    ],
+    [pinnedThreads, displayedActiveThreads, visibleSnoozedThreads, renderedSettledThreads],
   );
   const orderedThreadKeys = useMemo(
     () =>
@@ -3301,43 +3338,17 @@ export default function Sidebar() {
     autoAnimate(node, { duration: 150, easing: "ease-out" });
   }, []);
 
-  // New thread defaults to the project you're in (active thread's project,
-  // falling back to the top project) — same resolution the command palette
-  // uses. The command palette already offers a "New thread in..." submenu
-  // for multi-project setups.
-  const handleNewThreadClick = useCallback(
-    (event?: ReactMouseEvent) => {
-      // One project: nothing to pick, create immediately. Shift+click creates
-      // directly in the current project even with several projects, skipping
-      // the palette picker.
-      if (shouldCreateNewThreadInCurrentProject(event?.shiftKey ?? false, projectGroups.length)) {
-        if (isMobile) setOpenMobile(false);
-        void startNewThreadFromContext({
-          activeDraftThread: newThreadContext.activeDraftThread,
-          activeThread: newThreadContext.activeThread ?? undefined,
-          defaultProjectRef: newThreadContext.defaultProjectRef,
-          handleNewThread: newThreadContext.handleNewThread,
-        });
-        return;
-      }
-      if (isMobile) setOpenMobile(false);
-      openCommandPalette({ open: "new-thread-in" });
-    },
-    [isMobile, newThreadContext, projectGroups.length, setOpenMobile],
-  );
+  const handleUnassignedThreadClick = useCallback(() => {
+    if (isMobile) setOpenMobile(false);
+    void startNewThreadFromContext({
+      activeDraftThread: newThreadContext.activeDraftThread,
+      activeThread: newThreadContext.activeThread ?? undefined,
+      defaultProjectRef: newThreadContext.defaultProjectRef,
+      unassignedProjectRef: newThreadContext.unassignedProjectRef,
+      handleNewThread: newThreadContext.handleNewThread,
+    });
+  }, [isMobile, newThreadContext, setOpenMobile]);
 
-  // The button mirrors chat.new: in multi-project setups both route through
-  // the command palette's "New thread in..." picker, and in single-project
-  // setups both create immediately. In multi-project setups the label is only
-  // the picker's shortcut: falling back to chat.newLocal would advertise the
-  // same shortcut for both the picker and direct create. In single-project
-  // setups both commands create directly, so chat.newLocal is a valid
-  // fallback. The second tooltip line (multi-project only) advertises
-  // shift+click and its keyboard twin chat.newLocal for direct create.
-  const newThreadShortcutLabel =
-    shortcutLabelForCommand(keybindings, "chat.new") ??
-    (projectGroups.length <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
-  const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
   return (
     <>
       <SidebarChromeHeader isElectron={isElectron} />
@@ -3394,50 +3405,17 @@ export default function Sidebar() {
                   </Button>
                 ) : null}
               </div>
-              <div className="shrink-0">
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <SidebarMenuButton
-                        size="icon"
-                        type="button"
-                        className="relative focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
-                        onClick={handleNewThreadClick}
-                        disabled={projects.length === 0}
-                        aria-label="New thread"
-                      />
-                    }
-                  >
-                    <SquarePenIcon />
-                    <span
-                      className="pointer-events-none absolute left-1/2 top-1/2 size-[max(100%,3rem)] -translate-1/2 pointer-fine:hidden"
-                      aria-hidden="true"
-                    />
-                  </TooltipTrigger>
-                  <TooltipPopup side="right">
-                    {projectGroups.length > 1 ? (
-                      <span className="flex flex-col gap-0.5">
-                        <span>
-                          {newThreadShortcutLabel
-                            ? `New thread (${newThreadShortcutLabel})`
-                            : "New thread"}
-                        </span>
-                        <span className="text-muted-foreground">
-                          New thread in current project: Shift+click
-                          {newThreadInProjectShortcutLabel
-                            ? ` (${newThreadInProjectShortcutLabel})`
-                            : ""}
-                        </span>
-                      </span>
-                    ) : newThreadShortcutLabel ? (
-                      `New thread (${newThreadShortcutLabel})`
-                    ) : (
-                      "New thread"
-                    )}
-                  </TooltipPopup>
-                </Tooltip>
-              </div>
             </div>
+            <SidebarMenuButton
+              type="button"
+              className="w-full justify-start bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground"
+              onClick={handleUnassignedThreadClick}
+              disabled={!newThreadContext.unassignedProjectRef}
+              aria-label="New thread"
+            >
+              <SquarePenIcon />
+              <span>New thread</span>
+            </SidebarMenuButton>
             {projectGroups.length > 0 ? (
               <div className="flex items-center gap-1">
                 <Menu open={projectScopeMenuOpen} onOpenChange={setProjectScopeMenuOpen}>
@@ -3765,7 +3743,7 @@ export default function Sidebar() {
                       />,
                     );
                   }
-                  for (const thread of activeThreads) {
+                  for (const thread of displayedActiveThreads) {
                     items.push(renderThreadRow(thread, "active"));
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the

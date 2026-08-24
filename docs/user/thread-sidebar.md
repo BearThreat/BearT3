@@ -22,3 +22,12 @@ pill** fallback because their colors are not controlled by T3 Code.
 To generate a fresh title from the conversation, open a thread's context menu and choose
 **Regenerate title**. While T3 Code is generating it, the action reads **Regenerating…** and cannot
 be selected again. The option is hidden when the connected environment needs a server update.
+
+## Searching threads
+
+Thread search checks titles and completed conversation messages. An environment with the optional
+local search service can also find related wording, such as "account access problem" matching a
+thread about an expired login token. Exact text matches stay authoritative.
+
+Hybrid search runs on the machine that owns the threads. If the local service or embedding model is
+unavailable, search falls back to exact text without an error or sending conversation text away.

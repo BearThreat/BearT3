@@ -24,6 +24,7 @@ export interface ChatThreadActionContext {
   readonly activeDraftThread: ThreadContextLike | null;
   readonly activeThread: ThreadContextLike | undefined;
   readonly defaultProjectRef: ScopedProjectRef | null;
+  readonly unassignedProjectRef?: ScopedProjectRef | null;
   readonly handleNewThread: NewThreadHandler;
 }
 
@@ -37,6 +38,9 @@ export function resolveNewDraftStartFromOrigin(input: {
 export function resolveThreadActionProjectRef(
   context: ChatThreadActionContext,
 ): ScopedProjectRef | null {
+  if (context.unassignedProjectRef) {
+    return context.unassignedProjectRef;
+  }
   if (context.activeThread) {
     return scopeProjectRef(context.activeThread.environmentId, context.activeThread.projectId);
   }

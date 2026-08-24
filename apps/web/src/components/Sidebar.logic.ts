@@ -2,6 +2,7 @@ import * as React from "react";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
+  sortThreadsByConversationActivity,
   getThreadSortTimestamp,
   sortThreads,
   toSortableTimestamp,
@@ -120,6 +121,7 @@ export function buildBulkTitleRegenerationContextMenuItem(input: {
 export interface ThreadStatusPill {
   label:
     | "Working"
+    | "Recovering"
     | "Monitoring"
     | "Connecting"
     | "Completed"
@@ -138,6 +140,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 6,
   "Awaiting Input": 5,
   Working: 4,
+  Recovering: 4,
   Connecting: 4,
   "Plan Ready": 3,
   Monitoring: 2,
@@ -463,13 +466,14 @@ export type SidebarThreadStatus =
   | "approval"
   | "input"
   | "working"
+  | "recovering"
   | "monitoring"
   | "failed"
   | "ready";
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
+  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "latestTurn" | "backgroundLiveness"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
@@ -478,6 +482,12 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   }
   if (thread.hasPendingUserInput) {
     return "input";
+  }
+  if (
+    thread.latestTurn?.recovery === true &&
+    (thread.session?.status === "running" || thread.session?.status === "starting")
+  ) {
+    return "recovering";
   }
   if (thread.session?.status === "running" || thread.session?.status === "starting") {
     return "working";
@@ -531,18 +541,19 @@ export function firstValidTimestamp(
   return null;
 }
 
-// Sidebar sort: static creation order, newest thread on top. Activity NEVER
-// reorders the list — a row holds its position from open until settled, so
-// the screen only moves at lifecycle transitions. Status (including pending
-// approval) is carried by each card's edge strip, not by position.
+// Active chats follow conversation recency. Incidental metadata updates do
+// not move a row; only a user message or completed agent turn does.
 export function sortThreadsForSidebar<
-  T extends { readonly id: string; readonly createdAt: string },
+  T extends {
+    readonly id: string;
+    readonly createdAt: string;
+    readonly latestUserMessageAt?: string | null;
+    readonly latestTurn?: { readonly completedAt?: string | null } | null;
+    readonly session?: { readonly status: string } | null;
+    readonly backgroundLiveness?: "working" | "monitoring" | null | undefined;
+  },
 >(threads: readonly T[]): T[] {
-  return [...threads].toSorted(
-    (left, right) =>
-      parseTimestampMs(right.createdAt) - parseTimestampMs(left.createdAt) ||
-      left.id.localeCompare(right.id),
-  );
+  return sortThreadsByConversationActivity<T>(threads);
 }
 
 // Pinned-reorder key math and the keyed sort live in client-runtime
@@ -655,6 +666,18 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
+    };
+  }
+
+  if (
+    thread.latestTurn?.recovery === true &&
+    (thread.session?.status === "running" || thread.session?.status === "starting")
+  ) {
+    return {
+      label: "Recovering",
+      colorClass: "text-cyan-600 dark:text-cyan-300/90",
+      dotClass: "bg-cyan-500 dark:bg-cyan-300/90",
+      pulse: true,
     };
   }
 

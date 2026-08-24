@@ -13,10 +13,71 @@ export interface ThreadSortInput {
   }>;
 }
 
+export interface ConversationActivitySortInput {
+  readonly createdAt: string;
+  readonly latestUserMessageAt?: string | null;
+  readonly latestTurn?: {
+    readonly completedAt?: string | null;
+  } | null;
+  readonly session?: {
+    readonly status: string;
+  } | null;
+  readonly backgroundLiveness?: "working" | "monitoring" | null | undefined;
+}
+
 export function toSortableTimestamp(iso: string | undefined): number | null {
   if (!iso) return null;
   const ms = Date.parse(iso);
   return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Sidebar activity is conversation activity, not incidental thread metadata:
+ * a sent user message or the agent's completed response moves a chat to the
+ * top. Threads without either retain a useful creation-time fallback.
+ */
+export function getConversationActivityTimestamp(thread: ConversationActivitySortInput): number {
+  const userMessageAt = toSortableTimestamp(thread.latestUserMessageAt ?? undefined);
+  const agentFinalAt = toSortableTimestamp(thread.latestTurn?.completedAt ?? undefined);
+  return Math.max(
+    userMessageAt ?? Number.NEGATIVE_INFINITY,
+    agentFinalAt ?? Number.NEGATIVE_INFINITY,
+    ...(userMessageAt === null && agentFinalAt === null
+      ? [toSortableTimestamp(thread.createdAt) ?? Number.NEGATIVE_INFINITY]
+      : []),
+  );
+}
+
+/** Matches the sidebar's live-work states. A failed session wins over stale
+ * background metadata, just as it does in the status indicator. */
+export function hasLiveThreadWork(thread: ConversationActivitySortInput): boolean {
+  if (thread.session?.status === "error") return false;
+  return (
+    thread.session?.status === "running" ||
+    thread.session?.status === "starting" ||
+    thread.backgroundLiveness === "working" ||
+    thread.backgroundLiveness === "monitoring"
+  );
+}
+
+export function sortThreadsByConversationActivity<
+  T extends { readonly id: string } & ConversationActivitySortInput,
+>(threads: readonly T[]): T[] {
+  return Arr.sort(
+    threads,
+    Order.mapInput(
+      Order.Struct({
+        running: Order.flip(Order.Boolean),
+        timestamp: Order.flip(Order.Number),
+        id: Order.String,
+      }),
+      (thread: T) => ({
+        running: hasLiveThreadWork(thread),
+        timestamp: getConversationActivityTimestamp(thread),
+        id: thread.id,
+      }),
+    ),
+  );
 }
 
 function getFirstSortableTimestamp(...values: Array<string | null | undefined>): number | null {

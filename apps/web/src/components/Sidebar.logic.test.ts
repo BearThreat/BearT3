@@ -677,7 +677,12 @@ describe("resolveSidebarThreadStatus", () => {
     updatedAt: "2026-03-09T10:00:00.000Z",
   };
 
-  const idle = { hasPendingApprovals: false, hasPendingUserInput: false };
+  const idle = {
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    latestTurn: null,
+    backgroundLiveness: null,
+  };
 
   it("prioritizes approval over a running session", () => {
     expect(resolveSidebarThreadStatus({ ...idle, hasPendingApprovals: true, session })).toBe(
@@ -707,6 +712,24 @@ describe("resolveSidebarThreadStatus", () => {
         session: { ...session, status: "starting" as const },
       }),
     ).toBe("working");
+  });
+
+  it("reports recovering for a supervisor-created active turn", () => {
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        latestTurn: {
+          turnId: "turn-1" as never,
+          state: "running",
+          requestedAt: "2026-03-09T10:00:00.000Z",
+          startedAt: "2026-03-09T10:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+          recovery: true,
+        },
+        session,
+      }),
+    ).toBe("recovering");
   });
 
   it("reports failed only while the session status is error", () => {
@@ -756,28 +779,133 @@ describe("searchSidebarThreadsByTitle", () => {
 });
 
 describe("sortThreadsForSidebar", () => {
-  const sortable = (input: { id: string; createdAt: string }) => ({
-    id: input.id,
-    createdAt: input.createdAt,
-  });
+  const sortable = (input: {
+    id: string;
+    createdAt: string;
+    latestUserMessageAt?: string | null;
+    latestTurn?: { completedAt: string | null } | null;
+    session?: { status: string } | null;
+    backgroundLiveness?: "working" | "monitoring" | null;
+  }) => input;
 
-  it("orders by creation time, newest first, ignoring activity", () => {
+  it("orders by the most recent user message or agent final, newest first", () => {
     const sorted = sortThreadsForSidebar([
-      sortable({ id: "oldest", createdAt: "2026-03-09T08:00:00.000Z" }),
-      sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
-      sortable({ id: "middle", createdAt: "2026-03-09T10:00:00.000Z" }),
+      sortable({
+        id: "latest-user",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T13:00:00.000Z",
+      }),
+      sortable({
+        id: "latest-agent-final",
+        createdAt: "2026-03-09T12:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T09:00:00.000Z",
+        latestTurn: { completedAt: "2026-03-09T14:00:00.000Z" },
+      }),
+      sortable({
+        id: "newest-created",
+        createdAt: "2026-03-09T15:00:00.000Z",
+      }),
     ]);
 
-    expect(sorted.map((thread) => thread.id)).toEqual(["newest", "middle", "oldest"]);
+    expect(sorted.map((thread) => thread.id)).toEqual([
+      "newest-created",
+      "latest-agent-final",
+      "latest-user",
+    ]);
   });
 
-  it("breaks creation-time ties by id so the order is stable", () => {
+  it("breaks activity-time ties by id so the order is stable", () => {
     const sorted = sortThreadsForSidebar([
-      sortable({ id: "b", createdAt: "2026-03-09T10:00:00.000Z" }),
-      sortable({ id: "a", createdAt: "2026-03-09T10:00:00.000Z" }),
+      sortable({
+        id: "b",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:00:00.000Z",
+      }),
+      sortable({
+        id: "a",
+        createdAt: "2026-03-09T09:00:00.000Z",
+        latestTurn: { completedAt: "2026-03-09T10:00:00.000Z" },
+      }),
     ]);
 
     expect(sorted.map((thread) => thread.id)).toEqual(["a", "b"]);
+  });
+
+  it("keeps running and starting chats above more recently completed chats", () => {
+    const sorted = sortThreadsForSidebar([
+      sortable({
+        id: "recent-completed",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        latestTurn: { completedAt: "2026-03-09T15:00:00.000Z" },
+        session: { status: "ready" },
+      }),
+      sortable({
+        id: "older-running",
+        createdAt: "2026-03-09T07:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:00:00.000Z",
+        session: { status: "running" },
+      }),
+      sortable({
+        id: "newer-starting",
+        createdAt: "2026-03-09T06:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T11:00:00.000Z",
+        session: { status: "starting" },
+      }),
+    ]);
+
+    expect(sorted.map((thread) => thread.id)).toEqual([
+      "newer-starting",
+      "older-running",
+      "recent-completed",
+    ]);
+  });
+
+  it("keeps background work above completed chats", () => {
+    const sorted = sortThreadsForSidebar([
+      sortable({
+        id: "recent-completed",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        latestTurn: { completedAt: "2026-03-09T15:00:00.000Z" },
+      }),
+      sortable({
+        id: "background-agent",
+        createdAt: "2026-03-09T07:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:00:00.000Z",
+        backgroundLiveness: "working",
+      }),
+      sortable({
+        id: "monitoring-loop",
+        createdAt: "2026-03-09T06:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T11:00:00.000Z",
+        backgroundLiveness: "monitoring",
+      }),
+    ]);
+
+    expect(sorted.map((thread) => thread.id)).toEqual([
+      "monitoring-loop",
+      "background-agent",
+      "recent-completed",
+    ]);
+  });
+
+  it("does not promote stale background metadata over a failed session", () => {
+    const sorted = sortThreadsForSidebar([
+      sortable({
+        id: "failed",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T12:00:00.000Z",
+        session: { status: "error" },
+        backgroundLiveness: "working",
+      }),
+      sortable({
+        id: "running",
+        createdAt: "2026-03-09T07:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:00:00.000Z",
+        session: { status: "running" },
+      }),
+    ]);
+
+    expect(sorted.map((thread) => thread.id)).toEqual(["running", "failed"]);
   });
 });
 
@@ -1095,6 +1223,17 @@ describe("resolveThreadStatusPill", () => {
         thread: baseThread,
       }),
     ).toMatchObject({ label: "Working", pulse: true });
+  });
+
+  it("shows recovering for a supervisor-created active turn", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          latestTurn: { ...makeLatestTurn(), state: "running", recovery: true },
+        },
+      }),
+    ).toMatchObject({ label: "Recovering", pulse: true });
   });
 
   it("shows plan ready when a settled plan turn has a proposed plan ready for follow-up", () => {
