@@ -17,7 +17,9 @@ import {
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
+import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -28,6 +30,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { ServerConfig } from "../../config.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderResumeFailureReason } from "../../provider/Errors.ts";
@@ -50,8 +53,13 @@ import {
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { buildProviderRecoveryContext } from "../ProviderRecoveryContext.ts";
+import { writeProviderRecoveryBundle } from "../ProviderRecoveryBundle.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+
+class ProviderRecoveryBundleWriteError extends Data.TaggedError(
+  "ProviderRecoveryBundleWriteError",
+)<{ readonly cause: unknown }> {}
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -312,6 +320,7 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  const serverConfig = yield* ServerConfig;
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -875,7 +884,45 @@ const make = Effect.gen(function* () {
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
     const recoveryReason = recoveredSessionReasons.get(input.threadId);
     const recoveryMarker = "[Current user request after provider-session recovery]";
-    const recoveryOverhead = `\n\n${recoveryMarker}\n`.length;
+    const recoveryProject =
+      recoveryReason === undefined ? undefined : yield* resolveProject(thread.projectId);
+    const recoveryCwd =
+      recoveryReason === undefined
+        ? undefined
+        : resolveThreadWorkspaceCwd({
+            thread,
+            projects: recoveryProject ? [recoveryProject] : [],
+          });
+    const recoveryNowMs = yield* Clock.currentTimeMillis;
+    const recoveryBundle =
+      recoveryReason === undefined || recoveryCwd === undefined
+        ? undefined
+        : yield* Effect.try({
+            try: () =>
+              writeProviderRecoveryBundle({
+                cwd: recoveryCwd,
+                attachmentsDir: serverConfig.attachmentsDir,
+                threadId: input.threadId,
+                currentMessageId: input.messageId,
+                messages: thread.messages,
+                nowMs: recoveryNowMs,
+              }),
+            catch: (cause) => new ProviderRecoveryBundleWriteError({ cause }),
+          }).pipe(
+            Effect.tapError((cause) =>
+              Effect.logWarning("provider recovery bundle creation failed", {
+                threadId: input.threadId,
+                cause,
+              }),
+            ),
+            Effect.option,
+            Effect.map(Option.getOrUndefined),
+          );
+    const recoveryReference =
+      recoveryBundle === undefined
+        ? ""
+        : `\n\nSupplemental bounded history manifest: ${recoveryBundle.manifestRelativePath}\nRead it only if the bounded transcript does not contain information needed for this request.`;
+    const recoveryOverhead = `${recoveryReference}\n\n${recoveryMarker}\n`.length;
     const recoveryContextBudget = Math.max(
       0,
       PROVIDER_SEND_TURN_MAX_INPUT_CHARS - (normalizedInput?.length ?? 0) - recoveryOverhead,
@@ -887,7 +934,7 @@ const make = Effect.gen(function* () {
     const providerInput =
       recoveryContext === undefined || recoveryContext.length === 0
         ? normalizedInput
-        : `${recoveryContext}\n\n${recoveryMarker}\n${normalizedInput ?? "[Attachment-only request]"}`;
+        : `${recoveryContext}${recoveryReference}\n\n${recoveryMarker}\n${normalizedInput ?? "[Attachment-only request]"}`;
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
       .listSessions()

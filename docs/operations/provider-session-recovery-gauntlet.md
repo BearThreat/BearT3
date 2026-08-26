@@ -30,7 +30,7 @@ The deterministic regression fixture uses small in-memory chunks and a configura
 3. Add provider-neutral `resumePolicy: "fresh"` to session start input.
 4. Let orchestration retry once. Do not let the Codex adapter silently start an empty thread.
 5. Build a bounded recovery prompt from durable BearT3 messages. Exclude the pending message from history, then append it once.
-6. Include historical attachment metadata only. A provider-neutral artifact retrieval tool does not exist yet.
+6. Write a bounded, private recovery bundle under the active workspace's ignored `.t3/recovery-context/` directory. Copy only regular allowlisted attachment files contained by BearT3's attachment store.
 7. Record recovery start and recovery-context submission as thread activities. A successful `sendTurn` call is not proof that the provider completed the turn.
 8. Persist the recovery state in the event log. Materialize active candidate bindings in bounded `provider_session_runtime` columns for startup reconciliation.
 9. Keep the canonical provider cursor unchanged while a candidate runs. Promote the candidate cursor and runtime payload with one guarded SQL update only after the matching successful `turn.completed` event.
@@ -58,6 +58,16 @@ The first critic returned LOSS because the integration test observed the send ca
 
 Gate: each recovery uses deterministic recovery, start, and dispatch keys. The event model rejects non-monotonic transitions. Candidate provider state is separate from the canonical binding. Startup reconciliation scans only active candidate rows. A prepared or candidate-started recovery receives at most one automatic dispatch. A dispatch-committed or turn-started recovery receives no automatic resend. Promotion requires the matching provider instance, turn ID, and successful completion state.
 
+### Wave 6: provider-neutral references
+
+Gate: every coding provider receives one workspace-relative manifest path. The manifest and message files are deterministic, bounded, mode `0600`, and contained below a non-symlinked workspace directory. Old bundles expire after 24 hours, and each thread retains at most eight bundles.
+
+Agent input boundary:
+
+- Sees now: the replacement agent sees the bounded transcript, current request, and manifest path.
+- Can fetch: the agent can read the manifest and its listed message text files with its normal workspace file tools. File contents enter model context only after the agent reads them.
+- Cannot see: unlisted messages and attachment bytes that were missing, unsafe, unsupported, or over a bundle limit. A sandbox policy that blocks `.t3` also blocks this retrieval path.
+
 ## Verification
 
 Run:
@@ -66,6 +76,7 @@ Run:
 ./node_modules/.bin/vp test run \
   apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts \
   apps/server/src/orchestration/ProviderRecoveryContext.test.ts \
+  apps/server/src/orchestration/ProviderRecoveryBundle.test.ts \
   packages/contracts/src/provider.test.ts \
   apps/server/src/provider/Layers/ProviderService.test.ts \
   apps/server/src/provider/Layers/CodexAdapter.test.ts \
@@ -73,7 +84,7 @@ Run:
   packages/effect-codex-app-server/src/protocol.test.ts
 ```
 
-Observed Wave 2 result in the isolated release candidate: twelve files and 266 tests pass. The reactor crash-boundary suite contains four restart probes: prepared, candidate-started, dispatch-committed, and turn-started.
+Observed Wave 2 result in the isolated release candidate: twelve files and 268 tests pass. The reactor crash-boundary suite contains four restart probes: prepared, candidate-started, dispatch-committed, and turn-started. The reference-bundle lane adds focused containment, bounds, determinism, file-mode, attachment-copy, prompt-leakage, cleanup, and symlink tests.
 
 Package checks:
 
@@ -87,7 +98,7 @@ All three checks exit successfully. The server check reports pre-existing Effect
 
 ## Release-candidate boundary
 
-This worktree is a durable Codex recovery release candidate. It is not deployed. The replacement provider agent sees a bounded inline transcript, attachment metadata for included messages, and the current request. It can use only the tools that its provider session exposes. It cannot see omitted messages, historical attachment bytes, or a durable retrieval handle.
+This worktree is a durable provider recovery release candidate. It is not deployed. The replacement provider agent sees a bounded inline transcript, the current request, and a workspace-relative recovery-manifest path. It can use its normal workspace tools to read bounded historical message and attachment copies. It cannot see unlisted history, rejected files, or anything blocked by its provider sandbox.
 
 The BearT3 controller sees the durable thread event history and the bounded active-candidate projection. It does not know whether a provider accepted a request if the process crashes after `dispatch-committed` but before a provider receipt. In that state it records uncertainty and suppresses automatic resend.
 
@@ -95,17 +106,18 @@ The portable guarantee is exactly-once recording of accepted BearT3 recovery tra
 
 ## Known gaps
 
-- Recovery context is inline text. Universal artifact references need a provider-neutral authenticated retrieval interface. The current MCP capability only exposes preview tools, and external OpenCode sessions do not receive that MCP server.
 - Provider delivery remains uncertain after a crash between the provider accepting a request and BearT3 receiving its result. BearT3 suppresses resend in this state.
-- The shared contract is provider-neutral, but this change classifies native stale and oversized resume errors only for Codex. Other adapters need native classifiers before they can enter this path automatically.
+- Historical attachment copying is limited to four allowlisted regular files, 5 MiB per file, and 10 MiB in total. Other attachment entries remain metadata only.
+- Workspace reference retrieval depends on the provider's normal file tools and sandbox allowing `.t3`. It works without MCP for ordinary Codex, Claude, Cursor, Grok, and OpenCode coding sessions, but it is not guaranteed for providers or modes without file access.
+- Provider classifiers are conservative. Ambiguous transport, timeout, decode, and asynchronous resume failures remain generic when the native protocol does not prove that starting fresh is safe.
 - `resumePolicy: "fresh"` now strips both an explicit request cursor and a matching persisted cursor before the adapter call. Tests cover explicit-over-persisted precedence and fresh-over-both precedence.
 
 ## Full shipping gates
 
-1. Add authenticated, bounded message and artifact retrieval references. Keep large historical data out of the initial prompt.
-2. Add native failure classifiers and conformance tests for Claude, Cursor, Grok, and OpenCode.
-3. Add provider-native idempotency keys where a provider supports them. Do not advertise exactly-once delivery for providers that do not.
-4. Run a live authenticated-client canary before deployment.
+1. Run the integrated deterministic suite and fresh critic after merging the durable, provider-matrix, and retrieval lanes.
+2. Add provider-native idempotency keys where a provider supports them. Do not advertise exactly-once delivery for providers that do not.
+3. Decide whether non-file-capable provider modes need an authenticated retrieval tool. Keep large binary data out of the initial prompt.
+4. Run a staged build and authenticated live-client canary before promotion.
 
 ## Rollback
 

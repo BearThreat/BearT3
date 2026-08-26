@@ -2039,6 +2039,9 @@ describe("ProviderCommandReactor", () => {
   });
 
   it("starts fresh once and prepends bounded history when provider resume is too large", async () => {
+    const recoveryCwd = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "provider-recovery-reference-"),
+    );
     let startAttempt = 0;
     const harness = await createHarness({
       startSessionEffect: (session) => {
@@ -2058,6 +2061,16 @@ describe("ProviderCommandReactor", () => {
       },
     });
     const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-recovery-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        branch: "recovery-test",
+        worktreePath: recoveryCwd,
+      }),
+    );
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -2102,8 +2115,19 @@ describe("ProviderCommandReactor", () => {
     expect(recoveredTurn?.input).toContain("[BearT3 provider-session recovery context]");
     expect(recoveredTurn?.input).toContain("Preserve this original objective.");
     expect(recoveredTurn?.input).toContain("Continue from there.");
+    expect(recoveredTurn?.input).toContain("Supplemental bounded history manifest: .t3/");
     expect(recoveredTurn?.input?.length).toBeLessThanOrEqual(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
     expect(recoveredTurn?.input?.match(/Continue from there\./g)).toHaveLength(1);
+    const manifestRelativePath = recoveredTurn?.input?.match(
+      /Supplemental bounded history manifest: ([^\n]+)/,
+    )?.[1];
+    expect(manifestRelativePath).toBeDefined();
+    const manifest = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(recoveryCwd, manifestRelativePath!), "utf8"),
+    );
+    expect(manifest.agentInputBoundary.seesNow).toContain("manifest path");
+    expect(manifest.messages).toHaveLength(1);
+    expect(manifest.messages[0].id).toBe("user-message-recovery-first");
     await waitFor(async () => {
       const snapshot = await harness.readModel();
       return (
@@ -2124,6 +2148,7 @@ describe("ProviderCommandReactor", () => {
         (activity) => activity.kind === "provider.session.recovery.submitted",
       ),
     ).toBe(true);
+    NodeFS.rmSync(recoveryCwd, { recursive: true, force: true });
   });
 
   it("does not resend a dispatch-committed recovery after restart", async () => {
