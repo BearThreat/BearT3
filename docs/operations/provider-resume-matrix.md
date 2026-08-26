@@ -4,7 +4,7 @@
 
 Detect native provider-history resume failures before BearT3 sends a pending user message. Return `ProviderAdapterResumeError` so the orchestration recovery path can create a fresh provider session with bounded BearT3 context.
 
-This change does not deploy BearT3. It does not change durable recovery state, cursor promotion, retry limits, or message delivery.
+This matrix documents the provider signals that feed BearT3's durable recovery flow. That flow stages a fresh candidate before start, commits dispatch before send, promotes its cursor only after a matching successful turn, and sends the pending request once.
 
 ## Agent input boundary
 
