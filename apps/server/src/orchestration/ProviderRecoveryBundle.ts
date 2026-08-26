@@ -276,7 +276,8 @@ export function writeProviderRecoveryBundle(input: {
     messages: manifestMessages,
     agentInputBoundary: {
       seesNow: "Only the recovery prompt and this manifest path.",
-      canFetch: "This manifest and listed message text files through workspace file tools.",
+      canFetch:
+        "This manifest and listed message or attachment files through workspace file tools.",
       cannotSee:
         "Unlisted messages and attachment bytes that were missing, unsafe, unsupported, or over a bundle limit.",
     },
