@@ -1612,6 +1612,10 @@ const make = Effect.gen(function* () {
         if (thread === undefined) {
           return;
         }
+        const activeRecovery = recoveredSessions.get(thread.id);
+        if (activeRecovery?.recoveryId === recovery.recoveryId) {
+          return;
+        }
         const source = thread.messages.find((message) => message.id === recovery.sourceMessageId);
         if (source?.role !== "user") {
           return;

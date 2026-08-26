@@ -2153,6 +2153,9 @@ describe("ProviderCommandReactor", () => {
           ) === true
       );
     });
+    await harness.drain();
+    expect(harness.startSession.mock.calls.length).toBe(3);
+    expect(harness.sendTurn.mock.calls.length).toBe(2);
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(
