@@ -22,13 +22,13 @@ When resume fails, no replacement provider agent exists yet. The orchestration l
 
 ## Classification matrix
 
-| Provider | Native boundary                                       | Classified now                                                | Still unsupported                                                                                                                |
-| -------- | ----------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Codex    | `thread/resume` and newline protocol input            | Missing session and oversized input                           | Other provider-specific stale or decode variants not emitted as the known typed errors                                           |
-| Claude   | Synchronous SDK query construction with a resume UUID | Explicit missing-session and stale-session messages           | Resume rejection that arrives later on the asynchronous SDK stream; oversized and decode failures without stable SDK error types |
-| Cursor   | ACP `session/load`                                    | Explicit missing, stale, and JSON-RPC method-not-found errors | Ambiguous internal, transport, timeout, decode, and oversized failures                                                           |
-| Grok     | ACP `session/load`                                    | Explicit missing, stale, and JSON-RPC method-not-found errors | Ambiguous internal, transport, timeout, decode, and oversized failures                                                           |
-| OpenCode | SDK `session.get`                                     | Structured HTTP 404 or exact OpenCode `NotFoundError`         | Stale, decode, oversized, and unsupported-resume signals not exposed by this SDK boundary                                        |
+| Provider | Native boundary                                           | Classified now                                                         | Still unsupported                                                                         |
+| -------- | --------------------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Codex    | `thread/resume` and newline protocol input                | Missing session and oversized input                                    | Other provider-specific stale or decode variants not emitted as the known typed errors    |
+| Claude   | SDK query construction and asynchronous query consumption | Explicit missing-session and stale-session messages at either boundary | Oversized and decode failures without stable SDK error types                              |
+| Cursor   | ACP `session/load`                                        | Explicit missing, stale, and JSON-RPC method-not-found errors          | Ambiguous internal, transport, timeout, decode, and oversized failures                    |
+| Grok     | ACP `session/load`                                        | Explicit missing, stale, and JSON-RPC method-not-found errors          | Ambiguous internal, transport, timeout, decode, and oversized failures                    |
+| OpenCode | SDK `session.get`                                         | Structured HTTP 404 or exact OpenCode `NotFoundError`                  | Stale, decode, oversized, and unsupported-resume signals not exposed by this SDK boundary |
 
 The classifiers are conservative. An unknown error stays a request or process error. This avoids replacing a valid provider session because of an authentication, network, or server outage.
 
@@ -37,12 +37,12 @@ The classifiers are conservative. An unknown error stays a request or process er
 - ACP classification is shared because Cursor and Grok use the same `effect-acp` session-load contract.
 - ACP classification runs only when BearT3 supplied a valid resume session ID.
 - OpenCode no longer converts a confirmed missing session into an empty session inside the adapter. Orchestration must own that recovery decision and context handoff.
-- Claude classifies only synchronous query-construction failures. Its asynchronous resume outcome needs a separate orchestration event contract before it can safely trigger the same retry.
+- Claude classifies missing-session and stale-session failures during query construction and asynchronous query consumption. Other asynchronous failures remain process errors.
 - No adapter classifies an error as oversized or decode-related without a stable structured protocol signal.
 
 ## Reproduction
 
-Base commit: `54b0326c31d81e70e6edc29af2123a4555a82cb8`.
+Reviewed base commit: `38c16d058`.
 
 ```bash
 ./node_modules/.bin/vp test run \
