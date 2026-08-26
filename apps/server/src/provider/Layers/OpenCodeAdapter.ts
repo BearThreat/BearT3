@@ -21,6 +21,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
@@ -33,6 +34,7 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -54,6 +56,7 @@ import {
 import * as Option from "effect/Option";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
+const isProviderAdapterResumeError = Schema.is(ProviderAdapterResumeError);
 
 /**
  * Version tag stamped into the OpenCode resume cursor. Bump if the cursor
@@ -1247,19 +1250,25 @@ export function makeOpenCodeAdapter(
                   }),
                 );
               }
-              // Resume: re-adopt the session named by the durable cursor —
-              // OpenCode scopes history by session id. The probe recovers only
-              // a confirmed not-found (start fresh); transport/auth/server
-              // errors propagate instead of masking as a new empty session.
+              // Resume: re-adopt the session named by the durable cursor.
+              // A confirmed miss is a typed recovery signal for orchestration;
+              // this adapter must not silently replace provider history.
               const resolved = yield* Effect.gen(function* () {
                 const adopted = resumeSessionId
                   ? yield* runOpenCodeSdk("session.get", () =>
                       client.session.get({ sessionID: resumeSessionId }),
                     ).pipe(
                       Effect.map((response) => response.data),
-                      Effect.catchIf(
-                        (cause) => isOpenCodeNotFound(cause),
-                        () => Effect.void,
+                      Effect.mapError((cause) =>
+                        isOpenCodeNotFound(cause)
+                          ? new ProviderAdapterResumeError({
+                              provider: PROVIDER,
+                              method: "session.get",
+                              reason: "session_missing",
+                              detail: "OpenCode cannot find the persisted provider session.",
+                              cause,
+                            })
+                          : cause,
                       ),
                     )
                   : undefined;
@@ -1312,11 +1321,6 @@ export function makeOpenCodeAdapter(
                   return { openCodeSession: forked, created: true };
                 }
 
-                if (resumeSessionId) {
-                  yield* Effect.logWarning(
-                    `OpenCode session '${resumeSessionId}' no longer exists; starting a fresh session.`,
-                  );
-                }
                 const createdSession = yield* runOpenCodeSdk("session.create", () =>
                   client.session.create({
                     ...(input.title ? { title: input.title } : {}),
@@ -1343,7 +1347,11 @@ export function makeOpenCodeAdapter(
           );
           if (Exit.isFailure(startedExit)) {
             yield* Scope.close(sessionScope, Exit.void).pipe(Effect.ignore);
-            return yield* toProcessError(input.threadId, Cause.squash(startedExit.cause));
+            const cause = Cause.squash(startedExit.cause);
+            if (isProviderAdapterResumeError(cause)) {
+              return yield* cause;
+            }
+            return yield* toProcessError(input.threadId, cause);
           }
           return startedExit.value;
         });

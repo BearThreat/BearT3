@@ -88,6 +88,7 @@ import {
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -1536,6 +1537,43 @@ function toRequestError(threadId: ThreadId, method: string, cause: unknown): Pro
     provider: PROVIDER,
     method,
     detail: `${method} failed`,
+    cause,
+  });
+}
+
+function toClaudeStartError(
+  threadId: ThreadId,
+  hasResumeCursor: boolean,
+  cause: unknown,
+): ProviderAdapterProcessError | ProviderAdapterResumeError {
+  const message = toMessage(cause, "").trim().toLowerCase();
+  if (
+    hasResumeCursor &&
+    /(?:unknown|missing|invalid) session|session (?:was )?not found|session .*does not exist/.test(
+      message,
+    )
+  ) {
+    return new ProviderAdapterResumeError({
+      provider: PROVIDER,
+      method: "query/resume",
+      reason: "session_missing",
+      detail: "Claude cannot find the persisted provider session.",
+      cause,
+    });
+  }
+  if (hasResumeCursor && /(?:expired|stale) session|session (?:has )?expired/.test(message)) {
+    return new ProviderAdapterResumeError({
+      provider: PROVIDER,
+      method: "query/resume",
+      reason: "session_stale",
+      detail: "Claude rejected the persisted provider session as stale.",
+      cause,
+    });
+  }
+  return new ProviderAdapterProcessError({
+    provider: PROVIDER,
+    threadId,
+    detail: "Failed to start Claude runtime session.",
     cause,
   });
 }
@@ -4223,12 +4261,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             options: queryOptions,
           }),
         catch: (cause) =>
-          new ProviderAdapterProcessError({
-            provider: PROVIDER,
-            threadId,
-            detail: "Failed to start Claude runtime session.",
-            cause,
-          }),
+          toClaudeStartError(threadId, existingResumeSessionId !== undefined, cause),
       });
 
       const session: ProviderSession = {

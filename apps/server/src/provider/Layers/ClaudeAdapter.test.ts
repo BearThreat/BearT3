@@ -341,6 +341,46 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("classifies a synchronous missing Claude resume session", () => {
+    const cause = new Error("Unknown session: session-gone");
+    const layer = Layer.effect(
+      ClaudeAdapter,
+      Effect.gen(function* () {
+        const claudeConfig = decodeClaudeSettings({});
+        return yield* makeClaudeAdapter(claudeConfig, {
+          createQuery: () => {
+            throw cause;
+          },
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const error = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: { resume: "00000000-0000-4000-8000-000000000099" },
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterResumeError");
+      if (error._tag === "ProviderAdapterResumeError") {
+        assert.equal(error.reason, "session_missing");
+        assert.equal(error.method, "query/resume");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(layer),
+    );
+  });
+
   it.effect("derives bypass permission mode from full-access runtime policy", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
