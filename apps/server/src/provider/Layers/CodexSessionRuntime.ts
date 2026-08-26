@@ -476,22 +476,10 @@ export const openCodexThread = (input: {
     return input.client.request("thread/start", startParams);
   }
 
-  return input.client
-    .request("thread/resume", {
-      threadId: resumeThreadId,
-      ...startParams,
-    })
-    .pipe(
-      Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-          threadId: input.threadId,
-          requestedRuntimeMode: input.runtimeMode,
-          resumeThreadId,
-          recoverable: true,
-          cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
-      ),
-    );
+  return input.client.request("thread/resume", {
+    threadId: resumeThreadId,
+    ...startParams,
+  });
 };
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {

@@ -68,6 +68,32 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
   }
 }
 
+export const ProviderResumeFailureReason = Schema.Literals([
+  "payload_too_large",
+  "decode_failed",
+  "session_missing",
+  "session_stale",
+  "unsupported_resume",
+]);
+export type ProviderResumeFailureReason = typeof ProviderResumeFailureReason.Type;
+
+export class ProviderAdapterResumeError extends Schema.TaggedErrorClass<ProviderAdapterResumeError>()(
+  "ProviderAdapterResumeError",
+  {
+    provider: Schema.String,
+    method: Schema.String,
+    reason: ProviderResumeFailureReason,
+    detail: Schema.String,
+    maxBytes: Schema.optional(Schema.Number),
+    observedBytes: Schema.optional(Schema.Number),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Provider resume failed (${this.provider}) for ${this.method}: ${this.detail}`;
+  }
+}
+
 /**
  * ProviderAdapterProcessError - Provider process lifecycle failure.
  */
@@ -192,6 +218,7 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
+  | ProviderAdapterResumeError
   | ProviderAdapterProcessError;
 
 export type ProviderServiceError =

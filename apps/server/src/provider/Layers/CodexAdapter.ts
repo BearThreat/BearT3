@@ -45,6 +45,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
   ProviderAdapterProcessError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
@@ -57,6 +58,7 @@ import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
+  isRecoverableThreadResumeError,
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
@@ -66,6 +68,9 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
+const isCodexIncomingMessageTooLargeError = Schema.is(
+  CodexErrors.CodexAppServerIncomingMessageTooLargeError,
+);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
@@ -119,6 +124,39 @@ function mapCodexRuntimeError(
   return new ProviderAdapterRequestError({
     provider: PROVIDER,
     method,
+    detail: error.message,
+    cause: error,
+  });
+}
+
+function mapCodexStartError(
+  threadId: ThreadId,
+  hasResumeCursor: boolean,
+  error: CodexSessionRuntimeError,
+): ProviderAdapterError {
+  if (hasResumeCursor && isCodexIncomingMessageTooLargeError(error)) {
+    return new ProviderAdapterResumeError({
+      provider: PROVIDER,
+      method: "thread/resume",
+      reason: "payload_too_large",
+      detail: error.message,
+      maxBytes: error.limitBytes,
+      observedBytes: error.observedBytes,
+      cause: error,
+    });
+  }
+  if (hasResumeCursor && isRecoverableThreadResumeError(error)) {
+    return new ProviderAdapterResumeError({
+      provider: PROVIDER,
+      method: "thread/resume",
+      reason: "session_missing",
+      detail: error.message,
+      cause: error,
+    });
+  }
+  return new ProviderAdapterProcessError({
+    provider: PROVIDER,
+    threadId,
     detail: error.message,
     cause: error,
   });
@@ -1737,14 +1775,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ).pipe(Effect.forkIn(sessionScope));
 
         const started = yield* runtime.start().pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId: input.threadId,
-                detail: cause.message,
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            mapCodexStartError(input.threadId, input.resumeCursor !== undefined, cause),
           ),
           Effect.onError(() =>
             runtime.close.pipe(

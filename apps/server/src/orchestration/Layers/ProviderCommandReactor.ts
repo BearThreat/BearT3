@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -9,6 +10,7 @@ import {
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type RuntimeMode,
   type TurnId,
 } from "@t3tools/contracts";
@@ -28,6 +30,7 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import type { ProviderResumeFailureReason } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -46,6 +49,7 @@ import {
 } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { buildProviderRecoveryContext } from "../ProviderRecoveryContext.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
@@ -316,6 +320,7 @@ const make = Effect.gen(function* () {
     timeToLive: HANDLED_TURN_START_KEY_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const recoveredSessionReasons = new Map<ThreadId, ProviderResumeFailureReason>();
 
   const hasHandledTurnStartRecently = (key: string) =>
     Cache.getOption(handledTurnStartKeys, key).pipe(
@@ -359,6 +364,36 @@ const make = Effect.gen(function* () {
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
             turnId: input.turnId,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendProviderRecoveryActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly kind: "provider.session.recovery.started" | "provider.session.recovery.submitted";
+    readonly summary: string;
+    readonly reason: ProviderResumeFailureReason;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("provider-recovery-activity"),
+      eventId: serverEventId(),
+    }).pipe(
+      Effect.flatMap(({ commandId, eventId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: eventId,
+            tone: "info",
+            kind: input.kind,
+            summary: input.summary,
+            payload: { reason: input.reason },
+            turnId: null,
             createdAt: input.createdAt,
           },
           createdAt: input.createdAt,
@@ -608,6 +643,7 @@ const make = Effect.gen(function* () {
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
+      readonly resumePolicy?: "allow" | "fresh";
     }) =>
       providerService.startSession(threadId, {
         threadId,
@@ -617,8 +653,30 @@ const make = Effect.gen(function* () {
         ...(thread.title ? { title: thread.title } : {}),
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+        ...(input?.resumePolicy !== undefined ? { resumePolicy: input.resumePolicy } : {}),
         runtimeMode: desiredRuntimeMode,
       });
+
+    const startProviderSessionWithRecovery = (input?: { readonly resumeCursor?: unknown }) =>
+      startProviderSession(input).pipe(
+        Effect.catchTag("ProviderAdapterResumeError", (error) =>
+          appendProviderRecoveryActivity({
+            threadId,
+            kind: "provider.session.recovery.started",
+            summary: "Rebuilding provider context",
+            reason: error.reason,
+            createdAt,
+          }).pipe(
+            Effect.ignore,
+            Effect.andThen(startProviderSession({ resumePolicy: "fresh" })),
+            Effect.tap(() =>
+              Effect.sync(() => {
+                recoveredSessionReasons.set(threadId, error.reason);
+              }),
+            ),
+          ),
+        ),
+      );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -701,7 +759,7 @@ const make = Effect.gen(function* () {
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
       });
-      const restartedSession = yield* startProviderSession(
+      const restartedSession = yield* startProviderSessionWithRecovery(
         resumeCursor !== undefined ? { resumeCursor } : undefined,
       );
       yield* Effect.logInfo("provider command reactor restarted provider session", {
@@ -716,13 +774,14 @@ const make = Effect.gen(function* () {
       return restartedSession.threadId;
     }
 
-    const startedSession = yield* startProviderSession(undefined);
+    const startedSession = yield* startProviderSessionWithRecovery(undefined);
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   });
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly messageId: MessageId;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -743,6 +802,21 @@ const make = Effect.gen(function* () {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
+    const recoveryReason = recoveredSessionReasons.get(input.threadId);
+    const recoveryMarker = "[Current user request after provider-session recovery]";
+    const recoveryOverhead = `\n\n${recoveryMarker}\n`.length;
+    const recoveryContextBudget = Math.max(
+      0,
+      PROVIDER_SEND_TURN_MAX_INPUT_CHARS - (normalizedInput?.length ?? 0) - recoveryOverhead,
+    );
+    const recoveryContext =
+      recoveryReason === undefined
+        ? undefined
+        : buildProviderRecoveryContext(thread.messages, input.messageId, recoveryContextBudget);
+    const providerInput =
+      recoveryContext === undefined || recoveryContext.length === 0
+        ? normalizedInput
+        : `${recoveryContext}\n\n${recoveryMarker}\n${normalizedInput ?? "[Attachment-only request]"}`;
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
       .listSessions()
@@ -774,7 +848,7 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
-      ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(providerInput ? { input: providerInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
@@ -1152,6 +1226,7 @@ const make = Effect.gen(function* () {
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
@@ -1168,9 +1243,25 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap(() =>
+        Effect.gen(function* () {
+          const reason = recoveredSessionReasons.get(event.payload.threadId);
+          if (reason !== undefined) {
+            yield* appendProviderRecoveryActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.session.recovery.submitted",
+              summary: "Recovery context submitted",
+              reason,
+              createdAt: event.payload.createdAt,
+            }).pipe(Effect.ignore);
+          }
+          recoveredSessionReasons.delete(event.payload.threadId);
+        }),
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

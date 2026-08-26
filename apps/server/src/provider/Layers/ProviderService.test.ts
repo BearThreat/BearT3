@@ -1446,6 +1446,44 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, initial.threadId);
       }
 
+      secondClaude.startSession.mockClear();
+      const explicitResumeCursor = { sessionId: "explicit-resume" };
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(initial.threadId, {
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: claudeAgentInstanceId,
+          threadId: initial.threadId,
+          cwd: "/tmp/project-claude-start",
+          runtimeMode: "full-access",
+          resumeCursor: explicitResumeCursor,
+        });
+      }).pipe(Effect.provide(secondProviderLayer));
+
+      const explicitStartInput = secondClaude.startSession.mock.calls[0]?.[0] as
+        | { resumeCursor?: unknown }
+        | undefined;
+      assert.deepEqual(explicitStartInput?.resumeCursor, explicitResumeCursor);
+
+      secondClaude.startSession.mockClear();
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(initial.threadId, {
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: claudeAgentInstanceId,
+          threadId: initial.threadId,
+          cwd: "/tmp/project-claude-start",
+          runtimeMode: "full-access",
+          resumePolicy: "fresh",
+          resumeCursor: explicitResumeCursor,
+        });
+      }).pipe(Effect.provide(secondProviderLayer));
+
+      const freshStartInput = secondClaude.startSession.mock.calls[0]?.[0] as
+        | { resumeCursor?: unknown }
+        | undefined;
+      assert.equal(freshStartInput?.resumeCursor, undefined);
+
       NodeFS.rmSync(tempDir, { recursive: true, force: true });
     }).pipe(Effect.provide(NodeServices.layer)),
   );

@@ -9,6 +9,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -34,7 +35,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
+  type ProviderServiceError,
+} from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -152,7 +157,7 @@ describe("ProviderCommandReactor", () => {
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly startSessionEffect?: (
       session: ProviderSession,
-    ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    ) => Effect.Effect<ProviderSession, ProviderServiceError>;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -1907,6 +1912,94 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
     expect(harness.startSession.mock.calls.length).toBe(1);
     expect(harness.stopSession.mock.calls.length).toBe(0);
+  });
+
+  it("starts fresh once and prepends bounded history when provider resume is too large", async () => {
+    let startAttempt = 0;
+    const harness = await createHarness({
+      startSessionEffect: (session) => {
+        startAttempt += 1;
+        return startAttempt === 2
+          ? Effect.fail(
+              new ProviderAdapterResumeError({
+                provider: "codex",
+                method: "thread/resume",
+                reason: "payload_too_large",
+                detail: "Resume response exceeded the byte limit.",
+                maxBytes: 16 * 1024 * 1024,
+                observedBytes: 16 * 1024 * 1024 + 1,
+              }),
+            )
+          : Effect.succeed(session);
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-recovery-first"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-recovery-first"),
+          role: "user",
+          text: "Preserve this original objective.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    harness.runtimeSessions.length = 0;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-recovery-second"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-recovery-second"),
+          role: "user",
+          text: "Continue from there.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls.length).toBe(3);
+    expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+    const recoveredTurn = harness.sendTurn.mock.calls[1]?.[0] as { input?: string } | undefined;
+    expect(recoveredTurn?.input).toContain("[BearT3 provider-session recovery context]");
+    expect(recoveredTurn?.input).toContain("Preserve this original objective.");
+    expect(recoveredTurn?.input).toContain("Continue from there.");
+    expect(recoveredTurn?.input?.length).toBeLessThanOrEqual(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(recoveredTurn?.input?.match(/Continue from there\./g)).toHaveLength(1);
+    await waitFor(async () => {
+      const snapshot = await harness.readModel();
+      return (
+        snapshot.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) => activity.kind === "provider.session.recovery.submitted",
+          ) === true
+      );
+    });
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.some((activity) => activity.kind === "provider.session.recovery.started"),
+    ).toBe(true);
+    expect(
+      thread?.activities.some(
+        (activity) => activity.kind === "provider.session.recovery.submitted",
+      ),
+    ).toBe(true);
   });
 
   it("restarts an existing Codex thread on a compatible requested instance", async () => {

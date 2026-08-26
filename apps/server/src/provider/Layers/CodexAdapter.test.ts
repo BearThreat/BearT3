@@ -478,6 +478,55 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
     }).pipe(Effect.provide(customLayer));
   });
+
+  it.effect("maps an oversized resume response to a typed provider resume error", () => {
+    const runtimeFactory = vi.fn((options: CodexSessionRuntimeOptions) => {
+      const runtime = new FakeCodexRuntime(options);
+      Object.defineProperty(runtime, "start", {
+        value: () =>
+          Effect.fail(
+            new CodexErrors.CodexAppServerIncomingMessageTooLargeError({
+              limitBytes: 1024,
+              observedBytes: 1025,
+            }),
+          ),
+      });
+      return Effect.succeed(runtime);
+    });
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          makeRuntime: runtimeFactory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const result = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("sess-oversized-resume"),
+          resumeCursor: { threadId: "provider-thread-large" },
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterResumeError");
+      if (result.failure._tag === "ProviderAdapterResumeError") {
+        NodeAssert.equal(result.failure.reason, "payload_too_large");
+        NodeAssert.equal(result.failure.maxBytes, 1024);
+        NodeAssert.equal(result.failure.observedBytes, 1025);
+      }
+    }).pipe(Effect.provide(layer));
+  });
 });
 
 const lifecycleRuntimeFactory = makeRuntimeFactory();

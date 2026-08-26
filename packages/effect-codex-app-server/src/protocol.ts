@@ -33,6 +33,7 @@ export interface CodexAppServerIncomingRequest {
 
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
+  readonly maxIncomingMessageBytes?: number;
   readonly terminationError?: Effect.Effect<CodexError.CodexAppServerError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
@@ -45,6 +46,8 @@ export interface CodexAppServerPatchedProtocolOptions {
   ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
   readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
 }
+
+export const DEFAULT_CODEX_APP_SERVER_MAX_INCOMING_MESSAGE_BYTES = 16 * 1024 * 1024;
 
 export interface CodexAppServerPatchedProtocol {
   readonly incomingNotifications: Stream.Stream<CodexAppServerIncomingNotification>;
@@ -158,7 +161,28 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const pending = yield* Ref.make(new Map<string, CodexAppServerPendingRequest>());
     const nextRequestId = yield* Ref.make(1);
     const remainder = yield* Ref.make("");
+    const incomingLineBytes = yield* Ref.make(0);
     const terminationHandled = yield* Ref.make(false);
+    const maxIncomingMessageBytes =
+      options.maxIncomingMessageBytes ?? DEFAULT_CODEX_APP_SERVER_MAX_INCOMING_MESSAGE_BYTES;
+
+    const enforceIncomingMessageLimit = Effect.fnUntraced(function* (chunk: Uint8Array) {
+      let next = yield* Ref.get(incomingLineBytes);
+      for (const byte of chunk) {
+        if (byte === 0x0a) {
+          next = 0;
+          continue;
+        }
+        next += 1;
+        if (next > maxIncomingMessageBytes) {
+          return yield* new CodexError.CodexAppServerIncomingMessageTooLargeError({
+            limitBytes: maxIncomingMessageBytes,
+            observedBytes: next,
+          });
+        }
+      }
+      yield* Ref.set(incomingLineBytes, next);
+    });
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
       if (event.direction === "incoming" && !options.logIncoming) {
@@ -352,6 +376,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     };
 
     yield* options.stdio.stdin.pipe(
+      Stream.tap(enforceIncomingMessageLimit),
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
         Ref.modify(remainder, (current) => {
