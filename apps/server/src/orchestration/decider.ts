@@ -1225,6 +1225,74 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [unsettledEvent, sessionSetEvent];
     }
 
+    case "thread.provider-recovery.set": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const current = thread.recovery ?? null;
+      const next = command.recovery;
+      const phases = [
+        "prepared",
+        "candidate-started",
+        "dispatch-committed",
+        "turn-started",
+        "promoted",
+      ] as const;
+      const terminal = new Set(["promoted", "rolled-back", "failed"]);
+      if (current === null) {
+        const sourceMessage = thread.messages.find(
+          (message) => message.id === next.sourceMessageId,
+        );
+        if (next.phase !== "prepared" || sourceMessage?.role !== "user") {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "provider recovery must prepare from an existing user message",
+          });
+        }
+      } else {
+        if (current.recoveryId !== next.recoveryId || terminal.has(current.phase)) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "provider recovery cannot replace an active or terminal generation",
+          });
+        }
+        const currentIndex = phases.indexOf(current.phase as (typeof phases)[number]);
+        const nextIndex = phases.indexOf(next.phase as (typeof phases)[number]);
+        const isFailureTransition = next.phase === "failed";
+        const isRollback =
+          next.phase === "rolled-back" &&
+          (current.phase === "prepared" || current.phase === "candidate-started");
+        if (!isFailureTransition && !isRollback && nextIndex !== currentIndex + 1) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "provider recovery phase transition is not monotonic",
+          });
+        }
+        if (
+          next.phase === "promoted" &&
+          (current.candidateTurnId === undefined ||
+            next.candidateTurnId !== current.candidateTurnId)
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "provider recovery promotion requires the matching candidate turn",
+          });
+        }
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.provider-recovery-set",
+        payload: { threadId: command.threadId, recovery: next },
+      };
+    }
+
     case "thread.message.assistant.delta": {
       yield* requireThread({
         readModel,

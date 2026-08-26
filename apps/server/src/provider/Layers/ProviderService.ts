@@ -664,6 +664,118 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const startCandidateSession: ProviderService.ProviderServiceShape["startCandidateSession"] =
+    Effect.fn("startCandidateSession")(function* ({ recoveryId, recovery, session: rawInput }) {
+      const parsed = yield* decodeInputOrValidationError({
+        operation: "ProviderService.startCandidateSession",
+        schema: ProviderSessionStartInput,
+        payload: rawInput,
+      });
+      const threadId = parsed.threadId;
+      const instanceId = yield* requireBindingInstanceId(
+        "ProviderService.startCandidateSession",
+        parsed,
+      );
+      const info = yield* registry.getInstanceInfo(instanceId);
+      const adapter = yield* registry.getByInstance(instanceId);
+      const existingCandidate = Option.getOrUndefined(
+        yield* directory.getCandidate({ threadId, recoveryId }),
+      );
+      if (yield* adapter.hasSession(threadId)) {
+        yield* adapter.stopSession(threadId);
+      }
+      yield* prepareMcpSession(threadId, instanceId);
+      const candidate = yield* adapter.startSession({
+        ...parsed,
+        provider: info.driverKind,
+        providerInstanceId: instanceId,
+        resumePolicy: existingCandidate?.resumeCursor != null ? "allow" : "fresh",
+        ...(existingCandidate?.resumeCursor != null
+          ? { resumeCursor: existingCandidate.resumeCursor }
+          : {}),
+      });
+      const staged = yield* directory.stageCandidate({
+        threadId,
+        recoveryId,
+        recovery,
+        resumeCursor: candidate.resumeCursor ?? null,
+        runtimePayload: toRuntimePayloadFromSession(candidate, {
+          modelSelection: parsed.modelSelection,
+        }),
+      });
+      if (!staged) {
+        yield* adapter.stopSession(threadId);
+        return yield* toValidationError(
+          "ProviderService.startCandidateSession",
+          `Recovery candidate '${recoveryId}' could not be staged.`,
+        );
+      }
+      return { ...candidate, providerInstanceId: instanceId };
+    });
+  const prepareCandidateRecovery: NonNullable<
+    ProviderService.ProviderServiceShape["prepareCandidateRecovery"]
+  > = (input) =>
+    directory.stageCandidate({
+      ...input,
+      resumeCursor: null,
+      runtimePayload: null,
+    });
+
+  const sendCandidateTurn: ProviderService.ProviderServiceShape["sendCandidateTurn"] = Effect.fn(
+    "sendCandidateTurn",
+  )(function* ({ recoveryId, turn }) {
+    const binding = Option.getOrUndefined(yield* directory.getBinding(turn.threadId));
+    if (binding?.providerInstanceId === undefined) {
+      return yield* toValidationError(
+        "ProviderService.sendCandidateTurn",
+        `Thread '${turn.threadId}' has no canonical provider instance.`,
+      );
+    }
+    const committed = yield* directory.markCandidateDispatchCommitted({
+      threadId: turn.threadId,
+      recoveryId,
+    });
+    if (!committed) {
+      return yield* toValidationError(
+        "ProviderService.sendCandidateTurn",
+        `Recovery candidate '${recoveryId}' was already dispatched or is not staged.`,
+      );
+    }
+    const adapter = yield* registry.getByInstance(binding.providerInstanceId);
+    const result = yield* adapter.sendTurn({ ...turn, dispatchKey: `${recoveryId}:dispatch` });
+    const started = yield* directory.markCandidateTurnStarted({
+      threadId: turn.threadId,
+      recoveryId,
+      turnId: result.turnId,
+    });
+    if (!started) {
+      return yield* toValidationError(
+        "ProviderService.sendCandidateTurn",
+        `Recovery candidate '${recoveryId}' could not record its provider turn.`,
+      );
+    }
+    return result;
+  });
+
+  const promoteCandidateSession: ProviderService.ProviderServiceShape["promoteCandidateSession"] = (
+    input,
+  ) => directory.promoteCandidate(input);
+
+  const rollbackCandidateSession: ProviderService.ProviderServiceShape["rollbackCandidateSession"] =
+    Effect.fn("rollbackCandidateSession")(function* (input) {
+      const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      if (binding?.providerInstanceId !== undefined) {
+        const adapter = yield* registry.getByInstance(binding.providerInstanceId);
+        if (yield* adapter.hasSession(input.threadId)) {
+          yield* adapter.stopSession(input.threadId);
+        }
+      }
+      return yield* directory.rollbackCandidate(input);
+    });
+  const listRecoveryCandidates: NonNullable<
+    ProviderService.ProviderServiceShape["listRecoveryCandidates"]
+  > = () => directory.listCandidates();
+
   const sendTurn: ProviderServiceMethod<"sendTurn"> = Effect.fn("sendTurn")(function* (rawInput) {
     const parsed = yield* decodeInputOrValidationError({
       operation: "ProviderService.sendTurn",
@@ -1130,6 +1242,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   return {
     startSession,
+    startCandidateSession,
+    prepareCandidateRecovery,
+    listRecoveryCandidates,
+    sendCandidateTurn,
+    promoteCandidateSession,
+    rollbackCandidateSession,
     sendTurn,
     interruptTurn,
     respondToRequest,

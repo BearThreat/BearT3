@@ -310,6 +310,7 @@ export function projectEvent(
             activities: [],
             checkpoints: [],
             session: null,
+            recovery: null,
           },
           event.type,
           "thread",
@@ -610,6 +611,15 @@ export function projectEvent(
             updatedAt: event.occurredAt,
           }),
         };
+      });
+
+    case "thread.provider-recovery-set":
+      return Effect.succeed({
+        ...nextBase,
+        threads: updateThread(nextBase.threads, event.payload.threadId, {
+          recovery: event.payload.recovery,
+          updatedAt: event.occurredAt,
+        }),
       });
 
     case "thread.proposed-plan-upserted":

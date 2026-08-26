@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderDriverKind, ThreadId } from "@t3tools/contracts";
+import { MessageId, ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { it, assert } from "@effect/vitest";
 import { assertSome } from "@effect/vitest/utils";
 import * as Effect from "effect/Effect";
@@ -28,6 +28,20 @@ function makeDirectoryLayer<E, R>(persistenceLayer: Layer.Layer<SqlClient.SqlCli
     NodeServices.layer,
   );
 }
+
+const recoveryRecord = (recoveryId: string) => ({
+  recoveryId,
+  sourceMessageId: MessageId.make(`${recoveryId}-message`),
+  providerInstanceId: ProviderInstanceId.make("codex"),
+  reason: "payload_too_large" as const,
+  phase: "candidate-started" as const,
+  contextDigest: `${recoveryId}-digest`,
+  contextVersion: 1 as const,
+  startKey: `${recoveryId}:start`,
+  dispatchKey: `${recoveryId}:dispatch`,
+  preparedAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+});
 
 it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryLive", (it) => {
   it("upserts and reads thread bindings", () =>
@@ -267,5 +281,96 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
       }).pipe(Effect.provide(directoryLayer));
 
       NodeFS.rmSync(tempDir, { recursive: true, force: true });
+    }));
+
+  it("stages and rolls back a candidate without changing the canonical binding", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-candidate-rollback");
+
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        resumeCursor: { cursor: "canonical" },
+        runtimePayload: { generation: "canonical" },
+      });
+
+      assert.equal(
+        yield* directory.stageCandidate({
+          threadId,
+          recoveryId: "recovery-1",
+          recovery: recoveryRecord("recovery-1"),
+          resumeCursor: { cursor: "candidate" },
+          runtimePayload: { generation: "candidate" },
+        }),
+        true,
+      );
+      const canonicalBeforeRollback = yield* directory.getBinding(threadId);
+      assert.deepEqual(Option.getOrThrow(canonicalBeforeRollback).resumeCursor, {
+        cursor: "canonical",
+      });
+
+      assert.equal(yield* directory.rollbackCandidate({ threadId, recoveryId: "wrong" }), false);
+      assert.equal(
+        yield* directory.rollbackCandidate({ threadId, recoveryId: "recovery-1" }),
+        true,
+      );
+      assert.equal(
+        Option.isNone(yield* directory.getCandidate({ threadId, recoveryId: "recovery-1" })),
+        true,
+      );
+      const canonicalAfterRollback = yield* directory.getBinding(threadId);
+      assert.deepEqual(Option.getOrThrow(canonicalAfterRollback).resumeCursor, {
+        cursor: "canonical",
+      });
+    }));
+
+  it("promotes only a matching candidate with a started turn", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-candidate-promote");
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        resumeCursor: { cursor: "canonical" },
+        runtimePayload: { generation: "canonical" },
+      });
+      yield* directory.stageCandidate({
+        threadId,
+        recoveryId: "recovery-2",
+        recovery: recoveryRecord("recovery-2"),
+        resumeCursor: { cursor: "candidate" },
+        runtimePayload: { generation: "candidate" },
+      });
+
+      assert.equal(
+        yield* directory.promoteCandidate({ threadId, recoveryId: "recovery-2" }),
+        false,
+      );
+      assert.equal(
+        yield* directory.markCandidateDispatchCommitted({
+          threadId,
+          recoveryId: "recovery-2",
+        }),
+        true,
+      );
+      assert.equal(
+        yield* directory.markCandidateTurnStarted({
+          threadId,
+          recoveryId: "recovery-2",
+          turnId: "provider-turn-1",
+        }),
+        true,
+      );
+      assert.equal(yield* directory.promoteCandidate({ threadId, recoveryId: "wrong" }), false);
+      assert.equal(yield* directory.promoteCandidate({ threadId, recoveryId: "recovery-2" }), true);
+
+      const canonical = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.deepEqual(canonical.resumeCursor, { cursor: "candidate" });
+      assert.deepEqual(canonical.runtimePayload, { generation: "candidate" });
+      assert.equal(
+        Option.isNone(yield* directory.getCandidate({ threadId, recoveryId: "recovery-2" })),
+        true,
+      );
     }));
 });

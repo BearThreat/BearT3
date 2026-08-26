@@ -155,6 +155,11 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
+    readonly recoveryBeforeStartPhase?:
+      | "prepared"
+      | "candidate-started"
+      | "dispatch-committed"
+      | "turn-started";
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
@@ -168,6 +173,9 @@ describe("ProviderCommandReactor", () => {
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
+    let recoveryCandidateBeforeStart:
+      | import("../../provider/Services/ProviderSessionDirectory.ts").ProviderRuntimeCandidateBinding
+      | undefined;
     const modelSelection = input?.threadModelSelection ?? {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
@@ -315,7 +323,17 @@ describe("ProviderCommandReactor", () => {
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
+      startCandidateSession: ({ session }) =>
+        startSession(session.threadId, session) as ReturnType<
+          NonNullable<ProviderServiceShape["startCandidateSession"]>
+        >,
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
+      sendCandidateTurn: ({ turn }) =>
+        sendTurn(turn) as ReturnType<NonNullable<ProviderServiceShape["sendCandidateTurn"]>>,
+      promoteCandidateSession: () => Effect.succeed(true),
+      rollbackCandidateSession: () => Effect.succeed(true),
+      listRecoveryCandidates: () =>
+        Effect.succeed(recoveryCandidateBeforeStart ? [recoveryCandidateBeforeStart] : []),
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
@@ -454,6 +472,112 @@ describe("ProviderCommandReactor", () => {
         createdAt: now,
       }),
     );
+    if (input?.recoveryBeforeStartPhase !== undefined) {
+      const messageId = asMessageId("recovery-before-start-message");
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("recovery-before-start-turn"),
+          threadId: ThreadId.make("thread-1"),
+          message: { messageId, role: "user", text: "Resume after crash", attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      const recovery = {
+        recoveryId: `recovery:thread-1:${messageId}`,
+        sourceMessageId: messageId,
+        providerInstanceId: modelSelection.instanceId,
+        reason: "payload_too_large" as const,
+        phase: "prepared" as const,
+        contextDigest: "context-v1:test",
+        contextVersion: 1 as const,
+        startKey: `recovery:thread-1:${messageId}:start`,
+        dispatchKey: `recovery:thread-1:${messageId}:dispatch`,
+        preparedAt: now,
+        updatedAt: now,
+      };
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(recovery.startKey),
+          threadId: ThreadId.make("thread-1"),
+          recovery,
+          createdAt: now,
+        }),
+      );
+      const candidateRecovery = { ...recovery, phase: "candidate-started" as const };
+      if (input.recoveryBeforeStartPhase !== "prepared") {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.startKey}:candidate`),
+            threadId: ThreadId.make("thread-1"),
+            recovery: candidateRecovery,
+            createdAt: now,
+          }),
+        );
+      }
+      const dispatchRecovery = { ...candidateRecovery, phase: "dispatch-committed" as const };
+      if (
+        input.recoveryBeforeStartPhase === "dispatch-committed" ||
+        input.recoveryBeforeStartPhase === "turn-started"
+      ) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(recovery.dispatchKey),
+            threadId: ThreadId.make("thread-1"),
+            recovery: dispatchRecovery,
+            createdAt: now,
+          }),
+        );
+      }
+      const turnRecovery = {
+        ...dispatchRecovery,
+        phase: "turn-started" as const,
+        candidateTurnId: asTurnId("candidate-turn-before-restart"),
+      };
+      if (input.recoveryBeforeStartPhase === "turn-started") {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.dispatchKey}:turn-started`),
+            threadId: ThreadId.make("thread-1"),
+            recovery: turnRecovery,
+            createdAt: now,
+          }),
+        );
+      }
+      const recoveryByPhase =
+        input.recoveryBeforeStartPhase === "prepared"
+          ? recovery
+          : input.recoveryBeforeStartPhase === "turn-started"
+            ? turnRecovery
+            : input.recoveryBeforeStartPhase === "dispatch-committed"
+              ? dispatchRecovery
+              : candidateRecovery;
+      recoveryCandidateBeforeStart = {
+        threadId: ThreadId.make("thread-1"),
+        recoveryId: recovery.recoveryId,
+        recovery: recoveryByPhase,
+        resumeCursor:
+          input.recoveryBeforeStartPhase === "prepared" ? null : { opaque: "candidate" },
+        runtimePayload: input.recoveryBeforeStartPhase === "prepared" ? null : {},
+        status:
+          input.recoveryBeforeStartPhase === "dispatch-committed"
+            ? "dispatch-committed"
+            : input.recoveryBeforeStartPhase === "turn-started"
+              ? "turn-started"
+              : "staged",
+        turnId:
+          input.recoveryBeforeStartPhase === "turn-started"
+            ? asTurnId("candidate-turn-before-restart")
+            : null,
+        updatedAt: now,
+      };
+    }
     if (input?.titleRegenerationBeforeStart === "two") {
       await Effect.runPromise(
         engine.dispatch({
@@ -2000,6 +2124,26 @@ describe("ProviderCommandReactor", () => {
         (activity) => activity.kind === "provider.session.recovery.submitted",
       ),
     ).toBe(true);
+  });
+
+  it("does not resend a dispatch-committed recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "dispatch-committed" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+  });
+
+  it("dispatches one candidate-started recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "candidate-started" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(1);
+  });
+
+  it("starts and dispatches one prepared recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "prepared" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(1);
+  });
+
+  it("does not resend a turn-started recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "turn-started" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
   });
 
   it("restarts an existing Codex thread on a compatible requested instance", async () => {

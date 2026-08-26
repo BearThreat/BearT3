@@ -308,6 +308,42 @@ export const OrchestrationSession = Schema.Struct({
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;
 
+export const ProviderRecoveryPhase = Schema.Literals([
+  "prepared",
+  "candidate-started",
+  "dispatch-committed",
+  "turn-started",
+  "promoted",
+  "rolled-back",
+  "failed",
+]);
+export type ProviderRecoveryPhase = typeof ProviderRecoveryPhase.Type;
+
+export const ProviderSessionRecovery = Schema.Struct({
+  recoveryId: TrimmedNonEmptyString,
+  sourceMessageId: MessageId,
+  providerInstanceId: ProviderInstanceId,
+  reason: Schema.Literals([
+    "payload_too_large",
+    "decode_failed",
+    "session_missing",
+    "session_stale",
+    "unsupported_resume",
+  ]),
+  phase: ProviderRecoveryPhase,
+  canonicalResumeCursor: Schema.optional(Schema.Unknown),
+  candidateResumeCursor: Schema.optional(Schema.Unknown),
+  contextDigest: TrimmedNonEmptyString,
+  contextVersion: Schema.Literal(1),
+  startKey: TrimmedNonEmptyString,
+  dispatchKey: TrimmedNonEmptyString,
+  candidateTurnId: Schema.optional(TurnId),
+  failure: Schema.optional(TrimmedNonEmptyString),
+  preparedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type ProviderSessionRecovery = typeof ProviderSessionRecovery.Type;
+
 export const OrchestrationCheckpointFile = Schema.Struct({
   path: TrimmedNonEmptyString,
   kind: TrimmedNonEmptyString,
@@ -419,6 +455,7 @@ export const OrchestrationThread = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
+  recovery: Schema.optional(Schema.NullOr(ProviderSessionRecovery)),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
@@ -470,6 +507,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   session: Schema.NullOr(OrchestrationSession),
+  recovery: Schema.optional(Schema.NullOr(ProviderSessionRecovery)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
   hasPendingUserInput: Schema.Boolean,
@@ -972,6 +1010,14 @@ const ThreadSessionSetCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadProviderRecoverySetCommand = Schema.Struct({
+  type: Schema.Literal("thread.provider-recovery.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  recovery: ProviderSessionRecovery,
+  createdAt: IsoDateTime,
+});
+
 const ThreadMessageAssistantDeltaCommand = Schema.Struct({
   type: Schema.Literal("thread.message.assistant.delta"),
   commandId: CommandId,
@@ -1039,6 +1085,7 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
 
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
+  ThreadProviderRecoverySetCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadProposedPlanUpsertCommand,
@@ -1082,6 +1129,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.reverted",
   "thread.session-stop-requested",
   "thread.session-set",
+  "thread.provider-recovery-set",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
@@ -1470,6 +1518,14 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-set"),
     payload: ThreadSessionSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.provider-recovery-set"),
+    payload: Schema.Struct({
+      threadId: ThreadId,
+      recovery: ProviderSessionRecovery,
+    }),
   }),
   Schema.Struct({
     ...EventBaseFields,

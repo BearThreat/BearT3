@@ -238,6 +238,13 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   getBinding: () => Effect.succeed(Option.none()),
   listThreadIds: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
+  stageCandidate: () => Effect.succeed(false),
+  getCandidate: () => Effect.succeed(Option.none()),
+  listCandidates: () => Effect.succeed([]),
+  markCandidateDispatchCommitted: () => Effect.succeed(false),
+  markCandidateTurnStarted: () => Effect.succeed(false),
+  promoteCandidate: () => Effect.succeed(false),
+  rollbackCandidate: () => Effect.succeed(false),
 });
 
 // The adapter now receives its settings as a plain argument (the old design

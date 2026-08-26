@@ -1558,6 +1558,44 @@ const make = Effect.gen(function* () {
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
           : null;
 
+      const recoveryCandidate =
+        event.type === "turn.completed" && providerService.listRecoveryCandidates !== undefined
+          ? (yield* providerService.listRecoveryCandidates()).find(
+              (candidate) => candidate.threadId === thread.id,
+            )
+          : undefined;
+      const recovery = recoveryCandidate?.recovery;
+      if (
+        event.type === "turn.completed" &&
+        shouldApplyThreadLifecycle &&
+        normalizeRuntimeTurnState(event.payload.state) === "completed" &&
+        recoveryCandidate?.status === "turn-started" &&
+        recovery !== undefined &&
+        eventTurnId !== undefined &&
+        recoveryCandidate.turnId === eventTurnId &&
+        event.providerInstanceId === recovery.providerInstanceId &&
+        providerService.promoteCandidateSession !== undefined
+      ) {
+        const promoted = yield* providerService.promoteCandidateSession({
+          threadId: thread.id,
+          recoveryId: recovery.recoveryId,
+        });
+        if (promoted) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.recoveryId}:promote`),
+            threadId: thread.id,
+            recovery: {
+              ...recovery,
+              phase: "promoted",
+              candidateTurnId: eventTurnId,
+              updatedAt: now,
+            },
+            createdAt: now,
+          });
+        }
+      }
+
       if (
         event.type === "session.started" ||
         event.type === "session.state.changed" ||

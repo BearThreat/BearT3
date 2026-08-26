@@ -32,6 +32,9 @@ The deterministic regression fixture uses small in-memory chunks and a configura
 5. Build a bounded recovery prompt from durable BearT3 messages. Exclude the pending message from history, then append it once.
 6. Include historical attachment metadata only. A provider-neutral artifact retrieval tool does not exist yet.
 7. Record recovery start and recovery-context submission as thread activities. A successful `sendTurn` call is not proof that the provider completed the turn.
+8. Persist the recovery state in the event log. Materialize active candidate bindings in bounded `provider_session_runtime` columns for startup reconciliation.
+9. Keep the canonical provider cursor unchanged while a candidate runs. Promote the candidate cursor and runtime payload with one guarded SQL update only after the matching successful `turn.completed` event.
+10. Write `dispatch-committed` before calling the provider. After a restart, never resend that automatic dispatch because the provider outcome is unknown.
 
 ## Gauntlet waves
 
@@ -51,6 +54,10 @@ Gate: a recoverable resume failure causes one fresh start in the same BearT3 thr
 
 The first critic returned LOSS because the integration test observed the send call before the forked submission activity was projected. The repaired test waits for the projected submission activity. It also checks one observed delivery and the maximum input size. It does not claim crash-safe exactly-once delivery.
 
+### Wave 5: durable recovery handoff
+
+Gate: each recovery uses deterministic recovery, start, and dispatch keys. The event model rejects non-monotonic transitions. Candidate provider state is separate from the canonical binding. Startup reconciliation scans only active candidate rows. A prepared or candidate-started recovery receives at most one automatic dispatch. A dispatch-committed or turn-started recovery receives no automatic resend. Promotion requires the matching provider instance, turn ID, and successful completion state.
+
 ## Verification
 
 Run:
@@ -66,7 +73,7 @@ Run:
   packages/effect-codex-app-server/src/protocol.test.ts
 ```
 
-Observed result in the isolated release candidate: seven files and 153 tests pass.
+Observed Wave 2 result in the isolated release candidate: twelve files and 266 tests pass. The reactor crash-boundary suite contains four restart probes: prepared, candidate-started, dispatch-committed, and turn-started.
 
 Package checks:
 
@@ -80,29 +87,29 @@ All three checks exit successfully. The server check reports pre-existing Effect
 
 ## Release-candidate boundary
 
-This worktree is Wave 1 evidence. It is not a deployable full thread-recovery system. The replacement provider agent receives a bounded inline transcript plus the current request. It does not receive omitted messages, historical attachment contents, or a durable retrieval handle. The orchestration process can read BearT3's projected messages, but its recovery marker is only process memory.
+This worktree is a durable Codex recovery release candidate. It is not deployed. The replacement provider agent sees a bounded inline transcript, attachment metadata for included messages, and the current request. It can use only the tools that its provider session exposes. It cannot see omitted messages, historical attachment bytes, or a durable retrieval handle.
+
+The BearT3 controller sees the durable thread event history and the bounded active-candidate projection. It does not know whether a provider accepted a request if the process crashes after `dispatch-committed` but before a provider receipt. In that state it records uncertainty and suppresses automatic resend.
+
+The portable guarantee is exactly-once recording of accepted BearT3 recovery transitions plus at-most-once automatic provider dispatch. It is not true exactly-once provider delivery.
 
 ## Known gaps
 
 - Recovery context is inline text. Universal artifact references need a provider-neutral authenticated retrieval interface. The current MCP capability only exposes preview tools, and external OpenCode sessions do not receive that MCP server.
-- Recovery state is process-local until the start or send completes. A server crash during this small interval can lose the recovery marker.
-- One observed send is not crash-safe exactly-once delivery. The design still needs a durable outbox and an idempotency key that survives process restart.
-- Provider cursor replacement is not transactional. Full transactional replacement needs a staged provider-session generation and an atomic commit after the first successful turn.
+- Provider delivery remains uncertain after a crash between the provider accepting a request and BearT3 receiving its result. BearT3 suppresses resend in this state.
 - The shared contract is provider-neutral, but this change classifies native stale and oversized resume errors only for Codex. Other adapters need native classifiers before they can enter this path automatically.
 - `resumePolicy: "fresh"` now strips both an explicit request cursor and a matching persisted cursor before the adapter call. Tests cover explicit-over-persisted precedence and fresh-over-both precedence.
 
 ## Full shipping gates
 
-1. Persist recovery phases and retry ownership in the event model.
-2. Use a transactional outbox and stable delivery key for the pending user turn.
-3. Stage the replacement session as a new generation. Promote its cursor with compare-and-swap only after a provider completion receipt.
-4. Add authenticated, bounded message and artifact retrieval references. Keep large historical data out of the initial prompt.
-5. Add native failure classifiers and conformance tests for Claude, Cursor, Grok, and OpenCode.
-6. Add crash-boundary tests after each state transition and a live authenticated-client canary.
+1. Add authenticated, bounded message and artifact retrieval references. Keep large historical data out of the initial prompt.
+2. Add native failure classifiers and conformance tests for Claude, Cursor, Grok, and OpenCode.
+3. Add provider-native idempotency keys where a provider supports them. Do not advertise exactly-once delivery for providers that do not.
+4. Run a live authenticated-client canary before deployment.
 
 ## Rollback
 
-Revert the files named in the ticket and this runbook. The change adds one optional contract field, so older callers remain valid. Do not remove or rewrite existing thread events during rollback.
+Revert the release-candidate commit before deployment. Migration 042 is additive. Do not remove its columns or rewrite existing thread events. A recovery rollback stops the candidate and clears only candidate columns; it retains the canonical cursor so BearT3 can restart the prior remote session.
 
 ## Reproduction sources
 
