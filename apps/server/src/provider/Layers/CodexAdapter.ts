@@ -71,6 +71,7 @@ const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTrans
 const isCodexIncomingMessageTooLargeError = Schema.is(
   CodexErrors.CodexAppServerIncomingMessageTooLargeError,
 );
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
@@ -142,6 +143,20 @@ function mapCodexStartError(
       detail: error.message,
       maxBytes: error.limitBytes,
       observedBytes: error.observedBytes,
+      cause: error,
+    });
+  }
+  if (
+    hasResumeCursor &&
+    isCodexAppServerRequestError(error) &&
+    error.method === "thread/resume" &&
+    error.operation === "decode-payload"
+  ) {
+    return new ProviderAdapterResumeError({
+      provider: PROVIDER,
+      method: "thread/resume",
+      reason: "session_stale",
+      detail: error.message,
       cause: error,
     });
   }

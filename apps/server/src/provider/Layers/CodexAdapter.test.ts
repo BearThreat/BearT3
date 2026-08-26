@@ -534,6 +534,125 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       }
     }).pipe(Effect.provide(layer));
   });
+
+  it.effect("maps an incompatible resumed thread payload to a typed provider resume error", () => {
+    const runtimeFactory = vi.fn((options: CodexSessionRuntimeOptions) => {
+      const runtime = new FakeCodexRuntime(options);
+      Object.defineProperty(runtime, "start", {
+        value: () =>
+          Effect.fail(
+            new CodexErrors.CodexAppServerRequestError({
+              code: -32602,
+              errorMessage: "Invalid payload for method 'thread/resume' during 'decode-payload'",
+              method: "thread/resume",
+              operation: "decode-payload",
+            }),
+          ),
+      });
+      return Effect.succeed(runtime);
+    });
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          makeRuntime: runtimeFactory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const result = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("sess-incompatible-resume"),
+          resumeCursor: { threadId: "provider-thread-old-schema" },
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterResumeError");
+      if (result.failure._tag === "ProviderAdapterResumeError") {
+        NodeAssert.equal(result.failure.reason, "session_stale");
+        NodeAssert.equal(result.failure.method, "thread/resume");
+      }
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("keeps unrelated Codex payload errors as process errors", () => {
+    const cases = [
+      {
+        name: "no-resume-cursor",
+        method: "thread/resume",
+        operation: "decode-payload" as const,
+        resumeCursor: undefined,
+      },
+      {
+        name: "different-method",
+        method: "thread/start",
+        operation: "decode-payload" as const,
+        resumeCursor: { threadId: "provider-thread-old-schema" },
+      },
+      {
+        name: "encode-failure",
+        method: "thread/resume",
+        operation: "encode-payload" as const,
+        resumeCursor: { threadId: "provider-thread-old-schema" },
+      },
+    ];
+
+    return Effect.forEach(cases, (testCase) => {
+      const runtimeFactory = vi.fn((options: CodexSessionRuntimeOptions) => {
+        const runtime = new FakeCodexRuntime(options);
+        Object.defineProperty(runtime, "start", {
+          value: () =>
+            Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32602,
+                errorMessage: "Unrelated Codex payload failure",
+                method: testCase.method,
+                operation: testCase.operation,
+              }),
+            ),
+        });
+        return Effect.succeed(runtime);
+      });
+      const layer = Layer.effect(
+        CodexAdapter,
+        Effect.gen(function* () {
+          const codexConfig = decodeCodexSettings({});
+          return yield* makeCodexAdapter(codexConfig, {
+            makeRuntime: runtimeFactory,
+          });
+        }),
+      ).pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(ServerSettingsService.layerTest()),
+        Layer.provideMerge(providerSessionDirectoryTestLayer),
+        Layer.provideMerge(NodeServices.layer),
+      );
+
+      return Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const result = yield* adapter
+          .startSession({
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId(`sess-${testCase.name}`),
+            ...(testCase.resumeCursor === undefined ? {} : { resumeCursor: testCase.resumeCursor }),
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.result);
+        NodeAssert.equal(result._tag, "Failure", testCase.name);
+        NodeAssert.equal(result.failure._tag, "ProviderAdapterProcessError", testCase.name);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.asVoid);
+  });
 });
 
 const lifecycleRuntimeFactory = makeRuntimeFactory();
