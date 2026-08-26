@@ -48,6 +48,9 @@ import {
   type RelayEnvironmentConnectRequest,
   type RelayDpopAccessTokenScope,
   RelayInternalError,
+  RelaySupportIssueInvalidError,
+  RelayHostedSandboxNotFoundError,
+  RelayHostedSandboxUnavailableError,
 } from "@t3tools/contracts/relay";
 import { normalizeRelayIssuer } from "@t3tools/shared/relayJwt";
 
@@ -67,6 +70,8 @@ import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvide
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
 import * as EnvironmentPublishSignatures from "../environments/EnvironmentPublishSignatures.ts";
 import * as MobileRegistrations from "../agentActivity/MobileRegistrations.ts";
+import * as SupportIssues from "../support/SupportIssues.ts";
+import * as HostedSandboxes from "../hostedSandboxes/HostedSandboxes.ts";
 import { withSpanAttributes } from "../observability.ts";
 import * as RelayDb from "../db.ts";
 
@@ -532,7 +537,191 @@ export const clientApi = HttpApiBuilder.group(
     const links = yield* EnvironmentLinks.EnvironmentLinks;
     const managedEndpointProvider = yield* ManagedEndpointProvider.ManagedEndpointProvider;
     const devices = yield* Devices.Devices;
+    const supportIssues = yield* SupportIssues.SupportIssues;
+    const hostedSandboxes = yield* HostedSandboxes.HostedSandboxes;
     return handlers
+      .handle(
+        "startHostedSandbox",
+        Effect.fn("salvo.api.client.startHostedSandbox")(function* (args) {
+          const { userId } = yield* RelayClientPrincipal;
+          yield* requireSalvoPilotMember(config, userId);
+          return yield* hostedSandboxes.start({ userId, requestId: args.payload.requestId }).pipe(
+            Effect.catchTags({
+              HostedSandboxProviderNotConfigured: () =>
+                hostedSandboxUnavailable("provider_not_configured"),
+              HostedSandboxProviderFailed: () => hostedSandboxUnavailable("provider_failed"),
+              HostedSandboxPersistenceError: () => hostedSandboxUnavailable("persistence_failed"),
+            }),
+          );
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "getHostedSandbox",
+        Effect.fn("salvo.api.client.getHostedSandbox")(function* (args) {
+          const { userId } = yield* RelayClientPrincipal;
+          yield* requireSalvoPilotMember(config, userId);
+          return yield* hostedSandboxes.status({ userId, sandboxId: args.params.sandboxId }).pipe(
+            Effect.catchTags({
+              HostedSandboxNotFound: () =>
+                currentTraceId.pipe(
+                  Effect.flatMap((traceId) =>
+                    Effect.fail(
+                      new RelayHostedSandboxNotFoundError({
+                        code: "hosted_sandbox_not_found",
+                        traceId,
+                      }),
+                    ),
+                  ),
+                ),
+              HostedSandboxPersistenceError: () => hostedSandboxUnavailable("persistence_failed"),
+            }),
+          );
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "stopHostedSandbox",
+        Effect.fn("salvo.api.client.stopHostedSandbox")(function* (args) {
+          const { userId } = yield* RelayClientPrincipal;
+          yield* requireSalvoPilotMember(config, userId);
+          return yield* hostedSandboxes.stop({ userId, sandboxId: args.params.sandboxId }).pipe(
+            Effect.catchTags({
+              HostedSandboxNotFound: () =>
+                currentTraceId.pipe(
+                  Effect.flatMap((traceId) =>
+                    Effect.fail(
+                      new RelayHostedSandboxNotFoundError({
+                        code: "hosted_sandbox_not_found",
+                        traceId,
+                      }),
+                    ),
+                  ),
+                ),
+              HostedSandboxProviderNotConfigured: () =>
+                hostedSandboxUnavailable("provider_not_configured"),
+              HostedSandboxProviderFailed: () => hostedSandboxUnavailable("provider_failed"),
+              HostedSandboxPersistenceError: () => hostedSandboxUnavailable("persistence_failed"),
+            }),
+          );
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "sendHostedSandboxPrompt",
+        Effect.fn("salvo.api.client.sendHostedSandboxPrompt")(function* (args) {
+          const { userId } = yield* RelayClientPrincipal;
+          yield* requireSalvoPilotMember(config, userId);
+          return yield* hostedSandboxes
+            .sendPrompt({
+              userId,
+              sandboxId: args.params.sandboxId,
+              requestId: args.payload.requestId,
+              prompt: args.payload.prompt,
+            })
+            .pipe(
+              Effect.catchTags({
+                HostedSandboxNotFound: () =>
+                  currentTraceId.pipe(
+                    Effect.flatMap((traceId) =>
+                      Effect.fail(
+                        new RelayHostedSandboxNotFoundError({
+                          code: "hosted_sandbox_not_found",
+                          traceId,
+                        }),
+                      ),
+                    ),
+                  ),
+                SponsoredInferenceUnavailable: () => hostedSandboxUnavailable("provider_failed"),
+                HostedSandboxProviderNotConfigured: () =>
+                  hostedSandboxUnavailable("provider_not_configured"),
+                HostedSandboxProviderFailed: () => hostedSandboxUnavailable("provider_failed"),
+                HostedSandboxPersistenceError: () => hostedSandboxUnavailable("persistence_failed"),
+              }),
+            );
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "createSupportIssue",
+        Effect.fn("salvo.api.client.createSupportIssue")(function* (args) {
+          const { userId } = yield* RelayClientPrincipal;
+          yield* requireSalvoPilotMember(config, userId);
+          return yield* supportIssues.create({ userId, request: args.payload }).pipe(
+            Effect.catchTags({
+              SupportIssueDiagnosticsConsentRequired: () =>
+                currentTraceId.pipe(
+                  Effect.flatMap((traceId) =>
+                    Effect.fail(
+                      new RelaySupportIssueInvalidError({
+                        code: "support_issue_invalid",
+                        reason: "diagnostics_consent_required",
+                        traceId,
+                      }),
+                    ),
+                  ),
+                ),
+              SupportIssueNotFound: () => relayInternalErrorResponse("persistence_failed"),
+            }),
+          );
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "listSupportIssues",
+        Effect.fn("salvo.api.client.listSupportIssues")(function* () {
+          const { userId } = yield* RelayClientPrincipal;
+          yield* requireSalvoPilotMember(config, userId);
+          return { issues: yield* supportIssues.listForUser({ userId }) };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "operatorListSupportIssues",
+        Effect.fn("salvo.api.operator.listSupportIssues")(function* () {
+          const { userId } = yield* RelayClientPrincipal;
+          if (!isSalvoOperatorUser(config, userId)) {
+            return yield* relayAuthInvalidError("not_authorized");
+          }
+          return { issues: yield* supportIssues.listForOperator() };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "operatorReplySupportIssue",
+        Effect.fn("salvo.api.operator.replySupportIssue")(function* ({ payload }) {
+          const principal = yield* RelayClientPrincipal;
+          if (!isSalvoOperatorUser(config, principal.userId)) {
+            return yield* relayAuthInvalidError("not_authorized");
+          }
+          const issue = yield* supportIssues
+            .updateByOperator({
+              userId: payload.userId,
+              receiptId: payload.receiptId,
+              status: payload.status,
+              ...(payload.reply === undefined ? {} : { reply: payload.reply }),
+            })
+            .pipe(
+              Effect.catchTag("SupportIssueNotFound", () =>
+                relayAuthInvalidError("not_authorized"),
+              ),
+            );
+          return { userId: payload.userId, issue };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "operatorSetProvisioningStop",
+        Effect.fn("salvo.api.operator.setProvisioningStop")(function* ({ payload }) {
+          const principal = yield* RelayClientPrincipal;
+          if (!isSalvoOperatorUser(config, principal.userId))
+            return yield* relayAuthInvalidError("not_authorized");
+          return yield* hostedSandboxes
+            .setProvisioningStop({
+              requestId: payload.requestId,
+              operatorUserId: principal.userId,
+              userId: payload.userId,
+              stopped: payload.stopped,
+            })
+            .pipe(
+              Effect.catchTag("HostedSandboxPersistenceError", () =>
+                hostedSandboxUnavailable("persistence_failed"),
+              ),
+            );
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
       .handle(
         "listEnvironments",
         Effect.fn("relay.api.client.listEnvironments")(function* () {
@@ -684,6 +873,27 @@ export const clientApi = HttpApiBuilder.group(
       );
   }),
 );
+
+export function isSalvoOperatorUser(
+  config: RelayConfiguration.RelayConfiguration["Service"],
+  userId: string,
+): boolean {
+  return config.salvoOperatorUserIds?.has(userId) === true;
+}
+
+export function isSalvoPilotMember(
+  config: RelayConfiguration.RelayConfiguration["Service"],
+  userId: string,
+): boolean {
+  return config.salvoPilotUserIds?.has(userId) === true;
+}
+
+export const requireSalvoPilotMember = Effect.fn("salvo.api.require_pilot_member")(function* (
+  config: RelayConfiguration.RelayConfiguration["Service"],
+  userId: string,
+) {
+  if (!isSalvoPilotMember(config, userId)) return yield* relayAuthInvalidError("not_authorized");
+});
 
 export const tokenApi = HttpApiBuilder.group(
   RelayApi,
@@ -1025,6 +1235,8 @@ const RelayCommonPersistenceError = Schema.Union([
   AgentActivityRows.AgentActivityRowListPersistenceError,
   LiveActivities.LiveActivityDeliveryMarkPersistenceError,
   DeliveryAttempts.DeliveryAttemptRecordPersistenceError,
+  SupportIssues.SupportIssuePersistenceError,
+  HostedSandboxes.HostedSandboxPersistenceError,
 ]);
 type RelayCommonPersistenceError = typeof RelayCommonPersistenceError.Type;
 const isRelayCommonPersistenceError = Schema.is(RelayCommonPersistenceError);
@@ -1038,6 +1250,20 @@ function relayInternalErrorResponse(reason: RelayInternalError["reason"]) {
   return currentTraceId.pipe(
     Effect.flatMap((traceId) =>
       Effect.fail(new RelayInternalError({ code: "internal_error", reason, traceId })),
+    ),
+  );
+}
+
+function hostedSandboxUnavailable(reason: RelayHostedSandboxUnavailableError["reason"]) {
+  return currentTraceId.pipe(
+    Effect.flatMap((traceId) =>
+      Effect.fail(
+        new RelayHostedSandboxUnavailableError({
+          code: "hosted_sandbox_unavailable",
+          reason,
+          traceId,
+        }),
+      ),
     ),
   );
 }

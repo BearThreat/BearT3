@@ -55,6 +55,7 @@ import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
 } from "../components/KeybindingsUpdateToast.logic";
+import { isSalvoHostedExperience } from "../salvo/hostedConfig";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -66,7 +67,7 @@ export const Route = createRootRoute({
       };
     }
 
-    if (isHostedStaticApp(new URL(window.location.href))) {
+    if (isSalvoHostedExperience() || isHostedStaticApp(new URL(window.location.href))) {
       return {
         authGateState: {
           status: "hosted-static",
@@ -101,6 +102,15 @@ function RootRouteView() {
   }, [pathname]);
 
   if (pathname === "/pair" || pathname === "/connect" || pathname.startsWith("/connect/")) {
+    return (
+      <>
+        <DocumentTitleSync />
+        <Outlet />
+      </>
+    );
+  }
+
+  if (pathname === "/" && isSalvoHostedExperience()) {
     return (
       <>
         <DocumentTitleSync />

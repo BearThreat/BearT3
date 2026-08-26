@@ -17,11 +17,15 @@ import {
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 import { clerkAppearance } from "./components/clerk/clerkAppearance";
+import { isSalvoHostedExperience } from "./salvo/hostedConfig";
+import { installRelayHostedOnboardingAdapter } from "./cloud/hostedSandboxes";
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
 
 const router = getRouter(history);
+
+if (isSalvoHostedExperience()) installRelayHostedOnboardingAdapter();
 
 if (isElectron) {
   syncDocumentElectronPlatformClasses(navigator.platform);

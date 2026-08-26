@@ -19,10 +19,16 @@ import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
+import { isSalvoHostedExperience } from "~/salvo/hostedConfig";
+import { SalvoHostedRoute } from "~/components/salvo/SalvoHostedRoute";
 
 function ChatIndexRouteView() {
   const { authGateState } = Route.useRouteContext();
   const { environments } = useEnvironments();
+
+  if (isSalvoHostedExperience()) {
+    return <SalvoHostedRoute />;
+  }
 
   if (authGateState.status === "hosted-static" && environments.length === 0) {
     return <HostedStaticOnboardingState />;

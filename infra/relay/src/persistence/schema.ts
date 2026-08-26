@@ -4,6 +4,7 @@ import type {
   RelayAgentAwarenessPreferences,
 } from "@t3tools/contracts/relay";
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -189,3 +190,279 @@ export const relayDpopProofs = pgTable(
     index("idx_relay_dpop_proofs_expires_at").on(table.expiresAt),
   ],
 );
+
+export const relaySupportIssues = pgTable(
+  "relay_support_issues",
+  {
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    receiptId: varchar("receipt_id", { length: 64 }).notNull(),
+    subject: varchar("subject", { length: 160 }).notNull(),
+    description: text("description").notNull(),
+    diagnosticsConsent: boolean("diagnostics_consent").notNull().default(false),
+    diagnosticsJson: jsonb("diagnostics_json").$type<{
+      readonly appVersion?: string | undefined;
+      readonly platform?: string | undefined;
+      readonly route?: string | undefined;
+      readonly environmentId?: string | undefined;
+      readonly threadId?: string | undefined;
+      readonly errorCode?: string | undefined;
+      readonly traceId?: string | undefined;
+    }>(),
+    status: varchar("status", { length: 32 })
+      .notNull()
+      .$type<"received" | "reviewing" | "resolved" | "closed">()
+      .default("received"),
+    operatorReply: text("operator_reply"),
+    repliedAt: varchar("replied_at", { length: 64 }),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+    updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.receiptId] }),
+    index("idx_relay_support_issues_user_updated").on(table.userId, table.updatedAt),
+    index("idx_relay_support_issues_status_updated").on(table.status, table.updatedAt),
+  ],
+);
+
+export const salvoHostedSandboxes = pgTable(
+  "salvo_hosted_sandboxes",
+  {
+    sandboxId: varchar("sandbox_id", { length: 64 }).primaryKey(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    requestId: varchar("request_id", { length: 128 }).notNull(),
+    status: varchar("status", { length: 16 })
+      .notNull()
+      .$type<"starting" | "ready" | "draining" | "stopped" | "failed">(),
+    providerRef: text("provider_ref"),
+    endpoint: text("endpoint"),
+    failureReason: varchar("failure_reason", { length: 64 }),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+    updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("idx_salvo_hosted_sandboxes_user").on(table.userId),
+    uniqueIndex("idx_salvo_hosted_sandboxes_user_request").on(table.userId, table.requestId),
+  ],
+);
+
+export const salvoSandboxBootstrapTokens = pgTable(
+  "salvo_sandbox_bootstrap_tokens",
+  {
+    tokenHash: varchar("token_hash", { length: 64 }).primaryKey(),
+    sandboxId: varchar("sandbox_id", { length: 64 }).notNull(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    clientToken: varchar("client_token", { length: 64 }).notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretHash: varchar("secret_hash", { length: 64 }),
+    expiresAt: varchar("expires_at", { length: 64 }).notNull(),
+    controlExpiresAt: varchar("control_expires_at", { length: 64 }).notNull(),
+    consumedAt: varchar("consumed_at", { length: 64 }),
+    revokedAt: varchar("revoked_at", { length: 64 }),
+    tunnelId: varchar("tunnel_id", { length: 191 }).notNull(),
+    generation: integer("generation").notNull().default(1),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    index("idx_salvo_bootstrap_tokens_binding").on(
+      table.sandboxId,
+      table.userId,
+      table.clientToken,
+    ),
+  ],
+);
+
+export const salvoHostedSandboxPrompts = pgTable(
+  "salvo_hosted_sandbox_prompts",
+  {
+    sandboxId: varchar("sandbox_id", { length: 64 }).notNull(),
+    requestId: varchar("request_id", { length: 128 }).notNull(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    prompt: text("prompt").notNull(),
+    status: varchar("status", { length: 16 })
+      .notNull()
+      .$type<"pending" | "dispatching" | "accepted">(),
+    leaseToken: varchar("lease_token", { length: 64 }),
+    leaseExpiresAt: varchar("lease_expires_at", { length: 64 }),
+    sandboxExecutionReceiptId: varchar("sandbox_execution_receipt_id", { length: 191 }),
+    gatewayProviderReceiptId: varchar("gateway_provider_receipt_id", { length: 191 }),
+    acceptedAt: varchar("accepted_at", { length: 64 }),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.sandboxId, table.requestId] }),
+    index("idx_salvo_hosted_sandbox_prompts_user").on(table.userId, table.createdAt),
+    index("idx_salvo_hosted_sandbox_prompts_lease").on(table.status, table.leaseExpiresAt),
+  ],
+);
+
+export const salvoProvisioningStops = pgTable("salvo_provisioning_stops", {
+  scope: varchar("scope", { length: 191 }).primaryKey(),
+  stopped: boolean("stopped").notNull(),
+  updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+});
+
+export const salvoProvisioningStopAudits = pgTable("salvo_provisioning_stop_audits", {
+  requestId: varchar("request_id", { length: 128 }).primaryKey(),
+  operatorUserId: varchar("operator_user_id", { length: 191 }).notNull(),
+  scope: varchar("scope", { length: 191 }).notNull(),
+  stopped: boolean("stopped").notNull(),
+  createdAt: varchar("created_at", { length: 64 }).notNull(),
+});
+
+export const salvoSandboxLifecycleHistory = pgTable(
+  "salvo_sandbox_lifecycle_history",
+  {
+    eventId: varchar("event_id", { length: 64 }).primaryKey(),
+    sandboxId: varchar("sandbox_id", { length: 64 }).notNull(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    event: varchar("event", { length: 32 }).notNull(),
+    detail: text("detail"),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+  },
+  (table) => [index("idx_salvo_lifecycle_history_sandbox").on(table.sandboxId, table.createdAt)],
+);
+
+export const salvoGauntletProbeReservations = pgTable(
+  "salvo_gauntlet_probe_reservations",
+  {
+    reservationId: varchar("reservation_id", { length: 64 }).primaryKey(),
+    deploymentRevision: varchar("deployment_revision", { length: 128 }).notNull(),
+    nonce: varchar("nonce", { length: 36 }).notNull(),
+    fixtureSetHash: varchar("fixture_set_hash", { length: 64 }).notNull(),
+    scenarioId: varchar("scenario_id", { length: 96 }).notNull(),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("idx_salvo_gauntlet_probe_revision_nonce").on(
+      table.deploymentRevision,
+      table.nonce,
+    ),
+    uniqueIndex("idx_salvo_gauntlet_probe_revision_fixtures").on(
+      table.deploymentRevision,
+      table.fixtureSetHash,
+    ),
+  ],
+);
+
+export const salvoCanaryBudgetControl = pgTable("salvo_canary_budget_control", {
+  singleton: integer("singleton").primaryKey(),
+  stopped: boolean("stopped").notNull().default(false),
+  capMicros: bigint("cap_micros", { mode: "number" }).notNull(),
+  authoritativeBilledMicros: bigint("authoritative_billed_micros", { mode: "number" })
+    .notNull()
+    .default(0),
+  authoritativeObservedAt: varchar("authoritative_observed_at", { length: 64 }),
+  updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+});
+
+export const salvoCanaryBudgetReservations = pgTable(
+  "salvo_canary_budget_reservations",
+  {
+    reservationId: varchar("reservation_id", { length: 191 }).primaryKey(),
+    kind: varchar("kind", { length: 16 }).notNull().$type<"aws" | "openai">(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+    reservedMicros: bigint("reserved_micros", { mode: "number" }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().$type<"active" | "settled" | "released">(),
+    actualMicros: bigint("actual_micros", { mode: "number" }),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+    updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+  },
+  (table) => [index("idx_salvo_canary_budget_status").on(table.status, table.updatedAt)],
+);
+
+export const salvoSponsoredInferenceControl = pgTable("salvo_sponsored_inference_control", {
+  singleton: integer("singleton").primaryKey(),
+  stopped: boolean("stopped").notNull().default(false),
+  reservedMicros: integer("reserved_micros").notNull().default(0),
+  billedMicros: integer("billed_micros").notNull().default(0),
+  updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+});
+
+export const salvoSponsoredInferenceUsers = pgTable("salvo_sponsored_inference_users", {
+  userId: varchar("user_id", { length: 191 }).primaryKey(),
+  reservedMicros: integer("reserved_micros").notNull().default(0),
+  billedMicros: integer("billed_micros").notNull().default(0),
+  updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+});
+
+export const salvoSponsoredInferenceGrants = pgTable(
+  "salvo_sponsored_inference_grants",
+  {
+    grantId: varchar("grant_id", { length: 64 }).primaryKey(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    sandboxId: varchar("sandbox_id", { length: 191 }).notNull(),
+    expiresAt: varchar("expires_at", { length: 64 }).notNull(),
+    revokedAt: varchar("revoked_at", { length: 64 }),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("idx_salvo_sponsored_inference_grants_token_hash").on(table.tokenHash),
+    index("idx_salvo_sponsored_inference_grants_owner").on(table.userId, table.sandboxId),
+  ],
+);
+
+export const salvoSponsoredInferenceRequests = pgTable(
+  "salvo_sponsored_inference_requests",
+  {
+    requestId: varchar("request_id", { length: 191 }).primaryKey(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    sandboxId: varchar("sandbox_id", { length: 191 }).notNull(),
+    turnId: varchar("turn_id", { length: 191 }).notNull(),
+    model: varchar("model", { length: 191 }).notNull(),
+    fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().$type<"running" | "completed" | "failed">(),
+    reservedMicros: integer("reserved_micros").notNull(),
+    billedMicros: integer("billed_micros"),
+    responseText: text("response_text"),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+    updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    index("idx_salvo_sponsored_inference_requests_user").on(table.userId, table.createdAt),
+  ],
+);
+
+export const salvoSponsoredInferenceAudits = pgTable(
+  "salvo_sponsored_inference_audits",
+  {
+    auditId: varchar("audit_id", { length: 64 }).primaryKey(),
+    requestId: varchar("request_id", { length: 191 }).notNull(),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    eventType: varchar("event_type", { length: 16 })
+      .notNull()
+      .$type<"accepted" | "completed" | "rejected" | "failed">(),
+    reason: varchar("reason", { length: 64 }),
+    /** Deliberately allowlisted metadata; prompts and provider response text never belong here. */
+    detailsJson: jsonb("details_json")
+      .notNull()
+      .$type<{
+        readonly sandboxId: string;
+        readonly turnId: string;
+        readonly model: string;
+        readonly maxOutputTokens: number;
+        readonly reserveMicros: number;
+      }>(),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    index("idx_salvo_sponsored_inference_audits_request").on(table.requestId, table.createdAt),
+  ],
+);
+
+export const salvoSponsoredResponseCalls = pgTable("salvo_sponsored_response_calls", {
+  callId: varchar("call_id", { length: 64 }).primaryKey(),
+  parentRequestId: varchar("parent_request_id", { length: 191 }).notNull(),
+  userId: varchar("user_id", { length: 191 }).notNull(),
+  sandboxId: varchar("sandbox_id", { length: 191 }).notNull(),
+  fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull().$type<"running" | "completed" | "failed">(),
+  reservedMicros: bigint("reserved_micros", { mode: "number" }).notNull(),
+  billedMicros: bigint("billed_micros", { mode: "number" }),
+  responseBase64: text("response_base64"),
+  responseContentType: varchar("response_content_type", { length: 191 }),
+  leaseExpiresAt: varchar("lease_expires_at", { length: 64 }),
+  createdAt: varchar("created_at", { length: 64 }).notNull(),
+  updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+});

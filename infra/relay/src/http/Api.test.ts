@@ -28,6 +28,9 @@ import {
   unlinkEnvironmentRecord,
   verifyRelayClientBearerToken,
   withoutCapturedParentSpan,
+  isSalvoOperatorUser,
+  isSalvoPilotMember,
+  requireSalvoPilotMember,
 } from "./Api.ts";
 import * as RelayConfiguration from "../Config.ts";
 import * as RelayDb from "../db.ts";
@@ -60,6 +63,47 @@ const relaySettings: RelayConfiguration.RelayConfiguration["Service"] = {
 };
 
 describe("relay client authentication", () => {
+  it("fails closed unless the Clerk user ID is explicitly admitted to the Salvo pilot", () => {
+    expect(isSalvoPilotMember(relaySettings, "family-user")).toBe(false);
+    expect(
+      isSalvoPilotMember(
+        { ...relaySettings, salvoPilotUserIds: new Set(["family-user"]) },
+        "family-user",
+      ),
+    ).toBe(true);
+    expect(
+      isSalvoPilotMember(
+        { ...relaySettings, salvoPilotUserIds: new Set(["family-user"]) },
+        "stranger",
+      ),
+    ).toBe(false);
+  });
+
+  it.effect("denies a nonmember before a hosted endpoint can run", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(requireSalvoPilotMember(relaySettings, "stranger"));
+      expect(Predicate.isTagged(error, "RelayAuthInvalidError")).toBe(true);
+      if (Predicate.isTagged(error, "RelayAuthInvalidError"))
+        expect(error.reason).toBe("not_authorized");
+    }),
+  );
+
+  it("fails closed unless the Clerk user ID is explicitly allowlisted", () => {
+    expect(isSalvoOperatorUser(relaySettings, "operator-1")).toBe(false);
+    expect(
+      isSalvoOperatorUser(
+        { ...relaySettings, salvoOperatorUserIds: new Set(["operator-1"]) },
+        "operator-1",
+      ),
+    ).toBe(true);
+    expect(
+      isSalvoOperatorUser(
+        { ...relaySettings, salvoOperatorUserIds: new Set(["operator-1"]) },
+        "family-user",
+      ),
+    ).toBe(false);
+  });
+
   it.effect("preserves the existing Clerk session JWT path", () =>
     Effect.gen(function* () {
       vi.mocked(verifyToken).mockResolvedValue({
@@ -104,6 +148,28 @@ describe("relay client authentication", () => {
         secretKey: "clerk-secret-key",
         publishableKey: "pk_test_test",
       });
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          vi.mocked(verifyToken).mockReset();
+          vi.mocked(createClerkClient).mockReset();
+        }),
+      ),
+    ),
+  );
+
+  it.effect("rejects a Clerk session token issued for the wrong audience", () =>
+    Effect.gen(function* () {
+      vi.mocked(verifyToken).mockResolvedValue({
+        sub: "family-user",
+        aud: "another-service",
+      } as never);
+      vi.mocked(createClerkClient).mockReturnValue({
+        authenticateRequest: vi
+          .fn()
+          .mockResolvedValue({ isAuthenticated: false, toAuth: () => ({ userId: null }) }),
+      } as never);
+      yield* Effect.flip(verifyRelayClientBearerToken(relaySettings, "wrong-audience"));
     }).pipe(
       Effect.ensuring(
         Effect.sync(() => {

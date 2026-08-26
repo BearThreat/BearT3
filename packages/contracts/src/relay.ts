@@ -512,6 +512,36 @@ export class RelayInternalError extends Schema.TaggedErrorClass<RelayInternalErr
   }
 }
 
+export class RelaySupportIssueInvalidError extends Schema.TaggedErrorClass<RelaySupportIssueInvalidError>()(
+  "RelaySupportIssueInvalidError",
+  {
+    code: Schema.Literal("support_issue_invalid"),
+    reason: Schema.Literal("diagnostics_consent_required"),
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 400 },
+) {
+  override get message(): string {
+    return "Diagnostics require explicit consent";
+  }
+}
+
+export class RelayHostedSandboxNotFoundError extends Schema.TaggedErrorClass<RelayHostedSandboxNotFoundError>()(
+  "RelayHostedSandboxNotFoundError",
+  { code: Schema.Literal("hosted_sandbox_not_found"), traceId: TrimmedNonEmptyString },
+  { httpApiStatus: 404 },
+) {}
+
+export class RelayHostedSandboxUnavailableError extends Schema.TaggedErrorClass<RelayHostedSandboxUnavailableError>()(
+  "RelayHostedSandboxUnavailableError",
+  {
+    code: Schema.Literal("hosted_sandbox_unavailable"),
+    reason: Schema.Literals(["provider_not_configured", "provider_failed", "persistence_failed"]),
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 503 },
+) {}
+
 export const RelayProtectedError = Schema.Union([
   RelayAuthInvalidError,
   RelayEnvironmentLinkProofExpiredError,
@@ -529,6 +559,17 @@ export const RelayProtectedError = Schema.Union([
 export type RelayProtectedError = typeof RelayProtectedError.Type;
 
 const RelayAuthAndInternalErrors = [RelayAuthInvalidError, RelayInternalError] as const;
+const RelaySupportIssueErrors = [
+  RelayAuthInvalidError,
+  RelaySupportIssueInvalidError,
+  RelayInternalError,
+] as const;
+const RelayHostedSandboxErrors = [
+  RelayAuthInvalidError,
+  RelayHostedSandboxNotFoundError,
+  RelayHostedSandboxUnavailableError,
+  RelayInternalError,
+] as const;
 
 const RelayEnvironmentLinkErrors = [
   RelayAuthInvalidError,
@@ -865,6 +906,122 @@ export const RelayHealthResponse = Schema.Struct({
 });
 export type RelayHealthResponse = typeof RelayHealthResponse.Type;
 
+export const RelaySupportIssueStatus = Schema.Literals([
+  "received",
+  "reviewing",
+  "resolved",
+  "closed",
+]);
+export type RelaySupportIssueStatus = typeof RelaySupportIssueStatus.Type;
+
+export const RelaySupportIssueDiagnostics = Schema.Struct({
+  appVersion: Schema.optional(TrimmedNonEmptyString),
+  platform: Schema.optional(TrimmedNonEmptyString),
+  route: Schema.optional(TrimmedNonEmptyString),
+  environmentId: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(TrimmedNonEmptyString),
+  errorCode: Schema.optional(TrimmedNonEmptyString),
+  traceId: Schema.optional(TrimmedNonEmptyString),
+});
+export type RelaySupportIssueDiagnostics = typeof RelaySupportIssueDiagnostics.Type;
+
+export const RelayCreateSupportIssueRequest = Schema.Struct({
+  receiptId: TrimmedNonEmptyString,
+  subject: TrimmedNonEmptyString.check(Schema.isMaxLength(160)),
+  description: TrimmedNonEmptyString.check(Schema.isMaxLength(10_000)),
+  diagnosticsConsent: Schema.Boolean,
+  diagnostics: Schema.optional(RelaySupportIssueDiagnostics),
+});
+export type RelayCreateSupportIssueRequest = typeof RelayCreateSupportIssueRequest.Type;
+
+export const RelaySupportIssueRecord = Schema.Struct({
+  receiptId: TrimmedNonEmptyString,
+  subject: TrimmedNonEmptyString,
+  description: TrimmedNonEmptyString,
+  diagnosticsConsent: Schema.Boolean,
+  diagnostics: Schema.NullOr(RelaySupportIssueDiagnostics),
+  status: RelaySupportIssueStatus,
+  operatorReply: Schema.NullOr(Schema.String),
+  repliedAt: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: TrimmedNonEmptyString,
+  updatedAt: TrimmedNonEmptyString,
+});
+export type RelaySupportIssueRecord = typeof RelaySupportIssueRecord.Type;
+
+export const RelayListSupportIssuesResponse = Schema.Struct({
+  issues: Schema.Array(RelaySupportIssueRecord),
+});
+export type RelayListSupportIssuesResponse = typeof RelayListSupportIssuesResponse.Type;
+
+export const RelayOperatorSupportIssueRecord = Schema.Struct({
+  userId: TrimmedNonEmptyString,
+  issue: RelaySupportIssueRecord,
+});
+export type RelayOperatorSupportIssueRecord = typeof RelayOperatorSupportIssueRecord.Type;
+
+export const RelayOperatorListSupportIssuesResponse = Schema.Struct({
+  issues: Schema.Array(RelayOperatorSupportIssueRecord),
+});
+export type RelayOperatorListSupportIssuesResponse =
+  typeof RelayOperatorListSupportIssuesResponse.Type;
+
+export const RelayOperatorReplySupportIssueRequest = Schema.Struct({
+  userId: TrimmedNonEmptyString,
+  receiptId: TrimmedNonEmptyString,
+  status: RelaySupportIssueStatus,
+  reply: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(10_000))),
+});
+export type RelayOperatorReplySupportIssueRequest =
+  typeof RelayOperatorReplySupportIssueRequest.Type;
+
+export const RelayHostedSandboxStatus = Schema.Literals([
+  "starting",
+  "ready",
+  "draining",
+  "stopped",
+  "failed",
+]);
+export type RelayHostedSandboxStatus = typeof RelayHostedSandboxStatus.Type;
+
+export const RelayStartHostedSandboxRequest = Schema.Struct({
+  requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+export type RelayStartHostedSandboxRequest = typeof RelayStartHostedSandboxRequest.Type;
+
+export const RelaySetProvisioningStopRequest = Schema.Struct({
+  requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  userId: Schema.NullOr(TrimmedNonEmptyString),
+  stopped: Schema.Boolean,
+});
+export const RelayProvisioningStopRecord = Schema.Struct({
+  scope: TrimmedNonEmptyString,
+  stopped: Schema.Boolean,
+});
+
+export const RelayHostedSandboxRecord = Schema.Struct({
+  sandboxId: TrimmedNonEmptyString,
+  status: RelayHostedSandboxStatus,
+  endpoint: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: TrimmedNonEmptyString,
+  updatedAt: TrimmedNonEmptyString,
+});
+export type RelayHostedSandboxRecord = typeof RelayHostedSandboxRecord.Type;
+
+export const RelaySendHostedSandboxPromptRequest = Schema.Struct({
+  requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(100_000)),
+});
+export type RelaySendHostedSandboxPromptRequest = typeof RelaySendHostedSandboxPromptRequest.Type;
+
+export const RelayHostedSandboxPromptReceipt = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+  sandboxId: TrimmedNonEmptyString,
+  sandboxExecutionReceiptId: TrimmedNonEmptyString,
+  gatewayProviderReceiptId: TrimmedNonEmptyString,
+  acceptedAt: TrimmedNonEmptyString,
+});
+export type RelayHostedSandboxPromptReceipt = typeof RelayHostedSandboxPromptReceipt.Type;
+
 export const RelayHealthGroup = HttpApiGroup.make("health")
   .add(
     HttpApiEndpoint.get("health", "/health", {
@@ -948,6 +1105,67 @@ export const RelayMobileGroup = HttpApiGroup.make("mobile")
 
 export const RelayClientGroup = HttpApiGroup.make("client")
   .add(
+    HttpApiEndpoint.post("startHostedSandbox", "/v1/client/hosted-sandboxes/start", {
+      headers: RelayBearerRequestHeaders,
+      payload: RelayStartHostedSandboxRequest,
+      success: RelayHostedSandboxRecord,
+      error: RelayHostedSandboxErrors,
+    }).annotate(OpenApi.Summary, "Start or resume the signed-in user's Salvo sandbox"),
+    HttpApiEndpoint.get("getHostedSandbox", "/v1/client/hosted-sandboxes/:sandboxId", {
+      headers: RelayBearerRequestHeaders,
+      params: Schema.Struct({ sandboxId: TrimmedNonEmptyString }),
+      success: RelayHostedSandboxRecord,
+      error: RelayHostedSandboxErrors,
+    }).annotate(OpenApi.Summary, "Read an owned Salvo sandbox"),
+    HttpApiEndpoint.delete("stopHostedSandbox", "/v1/client/hosted-sandboxes/:sandboxId", {
+      headers: RelayBearerRequestHeaders,
+      params: Schema.Struct({ sandboxId: TrimmedNonEmptyString }),
+      success: RelayHostedSandboxRecord,
+      error: RelayHostedSandboxErrors,
+    }).annotate(OpenApi.Summary, "Hibernate or stop the signed-in user's Salvo sandbox"),
+    HttpApiEndpoint.post(
+      "sendHostedSandboxPrompt",
+      "/v1/client/hosted-sandboxes/:sandboxId/prompts",
+      {
+        headers: RelayBearerRequestHeaders,
+        params: Schema.Struct({ sandboxId: TrimmedNonEmptyString }),
+        payload: RelaySendHostedSandboxPromptRequest,
+        success: RelayHostedSandboxPromptReceipt,
+        error: RelayHostedSandboxErrors,
+      },
+    ).annotate(OpenApi.Summary, "Dispatch a prompt at least once using a provider idempotency key"),
+    HttpApiEndpoint.post("createSupportIssue", "/v1/client/support-issues", {
+      headers: RelayBearerRequestHeaders,
+      payload: RelayCreateSupportIssueRequest,
+      success: RelaySupportIssueRecord,
+      error: RelaySupportIssueErrors,
+    }).annotate(OpenApi.Summary, "Report a Salvo issue"),
+    HttpApiEndpoint.get("listSupportIssues", "/v1/client/support-issues", {
+      headers: RelayBearerRequestHeaders,
+      success: RelayListSupportIssuesResponse,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "List the signed-in user's Salvo issues"),
+    HttpApiEndpoint.get("operatorListSupportIssues", "/v1/operator/support-issues", {
+      headers: RelayBearerRequestHeaders,
+      success: RelayOperatorListSupportIssuesResponse,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "List Salvo issues for an authorized operator"),
+    HttpApiEndpoint.post("operatorReplySupportIssue", "/v1/operator/support-issues/reply", {
+      headers: RelayBearerRequestHeaders,
+      payload: RelayOperatorReplySupportIssueRequest,
+      success: RelayOperatorSupportIssueRecord,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "Reply to a Salvo issue as an authorized operator"),
+    HttpApiEndpoint.post(
+      "operatorSetProvisioningStop",
+      "/v1/operator/hosted-sandboxes/provisioning-stop",
+      {
+        headers: RelayBearerRequestHeaders,
+        payload: RelaySetProvisioningStopRequest,
+        success: RelayProvisioningStopRecord,
+        error: RelayHostedSandboxErrors,
+      },
+    ).annotate(OpenApi.Summary, "Stop or resume Salvo provisioning globally or for one user"),
     HttpApiEndpoint.get("listEnvironments", "/v1/environments", {
       headers: RelayBearerRequestHeaders,
       success: RelayListEnvironmentsResponse,
