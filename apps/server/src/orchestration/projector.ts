@@ -1,4 +1,9 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type {
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  ProviderSessionRecovery,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -191,6 +196,26 @@ export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
     projects: [],
     threads: [],
     updatedAt: nowIso,
+  };
+}
+
+function sanitizeProviderRecovery(recovery: ProviderSessionRecovery): ProviderSessionRecovery {
+  return {
+    recoveryId: recovery.recoveryId,
+    sourceMessageId: recovery.sourceMessageId,
+    providerInstanceId: recovery.providerInstanceId,
+    reason: recovery.reason,
+    phase: recovery.phase,
+    contextDigest: recovery.contextDigest,
+    contextVersion: recovery.contextVersion,
+    startKey: recovery.startKey,
+    dispatchKey: recovery.dispatchKey,
+    ...(recovery.candidateTurnId !== undefined
+      ? { candidateTurnId: recovery.candidateTurnId }
+      : {}),
+    ...(recovery.failure !== undefined ? { failure: recovery.failure } : {}),
+    preparedAt: recovery.preparedAt,
+    updatedAt: recovery.updatedAt,
   };
 }
 
@@ -617,7 +642,7 @@ export function projectEvent(
       return Effect.succeed({
         ...nextBase,
         threads: updateThread(nextBase.threads, event.payload.threadId, {
-          recovery: event.payload.recovery,
+          recovery: sanitizeProviderRecovery(event.payload.recovery),
           updatedAt: event.occurredAt,
         }),
       });

@@ -1252,7 +1252,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           });
         }
       } else {
-        if (current.recoveryId !== next.recoveryId || terminal.has(current.phase)) {
+        const sourceMessage = thread.messages.find(
+          (message) => message.id === next.sourceMessageId,
+        );
+        const isTerminalSupersession =
+          terminal.has(current.phase) &&
+          current.recoveryId !== next.recoveryId &&
+          next.phase === "prepared" &&
+          sourceMessage?.role === "user";
+        if (
+          !isTerminalSupersession &&
+          (current.recoveryId !== next.recoveryId || terminal.has(current.phase))
+        ) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
             detail: "provider recovery cannot replace an active or terminal generation",
@@ -1264,13 +1275,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         const isRollback =
           next.phase === "rolled-back" &&
           (current.phase === "prepared" || current.phase === "candidate-started");
-        if (!isFailureTransition && !isRollback && nextIndex !== currentIndex + 1) {
+        if (
+          !isTerminalSupersession &&
+          !isFailureTransition &&
+          !isRollback &&
+          nextIndex !== currentIndex + 1
+        ) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
             detail: "provider recovery phase transition is not monotonic",
           });
         }
         if (
+          !isTerminalSupersession &&
           next.phase === "promoted" &&
           (current.candidateTurnId === undefined ||
             next.candidateTurnId !== current.candidateTurnId)

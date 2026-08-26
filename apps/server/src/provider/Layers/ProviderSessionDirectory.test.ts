@@ -373,4 +373,43 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
         true,
       );
     }));
+
+  it("does not regress a turn-started candidate when its runtime reconnects", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-candidate-reconnect");
+      const recoveryId = "recovery-reconnect";
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        resumeCursor: { cursor: "canonical" },
+      });
+      yield* directory.stageCandidate({
+        threadId,
+        recoveryId,
+        recovery: recoveryRecord(recoveryId),
+        resumeCursor: { cursor: "candidate-1" },
+        runtimePayload: { generation: 1 },
+      });
+      yield* directory.markCandidateDispatchCommitted({ threadId, recoveryId });
+      yield* directory.markCandidateTurnStarted({
+        threadId,
+        recoveryId,
+        turnId: "provider-turn-reconnect",
+      });
+
+      yield* directory.stageCandidate({
+        threadId,
+        recoveryId,
+        recovery: recoveryRecord(recoveryId),
+        resumeCursor: { cursor: "candidate-2" },
+        runtimePayload: { generation: 2 },
+      });
+
+      const candidate = Option.getOrThrow(yield* directory.getCandidate({ threadId, recoveryId }));
+      assert.equal(candidate.status, "turn-started");
+      assert.equal(candidate.turnId, "provider-turn-reconnect");
+      assert.equal(candidate.recovery.phase, "candidate-started");
+      assert.deepEqual(candidate.resumeCursor, { cursor: "candidate-2" });
+    }));
 });

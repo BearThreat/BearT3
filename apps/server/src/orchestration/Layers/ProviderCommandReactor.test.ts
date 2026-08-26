@@ -331,7 +331,11 @@ describe("ProviderCommandReactor", () => {
       sendCandidateTurn: ({ turn }) =>
         sendTurn(turn) as ReturnType<NonNullable<ProviderServiceShape["sendCandidateTurn"]>>,
       promoteCandidateSession: () => Effect.succeed(true),
-      rollbackCandidateSession: () => Effect.succeed(true),
+      rollbackCandidateSession: () =>
+        Effect.sync(() => {
+          recoveryCandidateBeforeStart = undefined;
+          return true;
+        }),
       listRecoveryCandidates: () =>
         Effect.succeed(recoveryCandidateBeforeStart ? [recoveryCandidateBeforeStart] : []),
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
@@ -617,6 +621,13 @@ describe("ProviderCommandReactor", () => {
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
+    const restartReactor = async () => {
+      if (scope) {
+        await Effect.runPromise(Scope.close(scope, Exit.void));
+      }
+      scope = await Effect.runPromise(Scope.make("sequential"));
+      await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+    };
 
     return {
       engine,
@@ -634,9 +645,13 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions,
       stateDir,
       drain,
+      restartReactor,
       runEffect,
       get titleRegenerationCompletionDispatchAttempts() {
         return titleRegenerationCompletionDispatchAttempts;
+      },
+      get recoveryCandidateCount() {
+        return recoveryCandidateBeforeStart === undefined ? 0 : 1;
       },
     };
   }
@@ -2154,6 +2169,45 @@ describe("ProviderCommandReactor", () => {
   it("does not resend a dispatch-committed recovery after restart", async () => {
     const harness = await createHarness({ recoveryBeforeStartPhase: "dispatch-committed" });
     expect(harness.sendTurn.mock.calls).toHaveLength(0);
+    expect(harness.recoveryCandidateCount).toBe(0);
+    await harness.restartReactor();
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+
+    const replacementId = "recovery:thread-1:replacement";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(`${replacementId}:prepare`),
+        threadId: ThreadId.make("thread-1"),
+        recovery: {
+          recoveryId: replacementId,
+          sourceMessageId: asMessageId("recovery-before-start-message"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          reason: "payload_too_large",
+          phase: "prepared",
+          contextDigest: "context-v1:replacement",
+          contextVersion: 1,
+          startKey: `${replacementId}:start`,
+          dispatchKey: `${replacementId}:dispatch`,
+          preparedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const events = await harness.runEffect(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    expect(
+      events.some(
+        (event) =>
+          event.type === "thread.provider-recovery-set" &&
+          event.payload.recovery.recoveryId === replacementId &&
+          event.payload.recovery.phase === "prepared",
+      ),
+    ).toBe(true);
   });
 
   it("dispatches one candidate-started recovery after restart", async () => {
@@ -2168,6 +2222,8 @@ describe("ProviderCommandReactor", () => {
 
   it("does not resend a turn-started recovery after restart", async () => {
     const harness = await createHarness({ recoveryBeforeStartPhase: "turn-started" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+    await harness.restartReactor();
     expect(harness.sendTurn.mock.calls).toHaveLength(0);
   });
 

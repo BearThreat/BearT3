@@ -34,7 +34,8 @@ The deterministic regression fixture uses small in-memory chunks and a configura
 7. Record recovery start and recovery-context submission as thread activities. A successful `sendTurn` call is not proof that the provider completed the turn.
 8. Persist the recovery state in the event log. Materialize active candidate bindings in bounded `provider_session_runtime` columns for startup reconciliation.
 9. Keep the canonical provider cursor unchanged while a candidate runs. Promote the candidate cursor and runtime payload with one guarded SQL update only after the matching successful `turn.completed` event.
-10. Write `dispatch-committed` before calling the provider. After a restart, never resend that automatic dispatch because the provider outcome is unknown.
+10. Write `dispatch-committed` before calling the provider. After a restart, never resend that automatic dispatch because the provider outcome is unknown. Mark the recovery failed, stop and clear its candidate, and permit a later prepared recovery generation to supersede the terminal record.
+11. When reconnecting a turn-started candidate runtime, update its cursor and runtime payload without regressing its durable status or provider turn ID. A second restart must still suppress resend.
 
 ## Gauntlet waves
 

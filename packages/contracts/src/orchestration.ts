@@ -331,8 +331,6 @@ export const ProviderSessionRecovery = Schema.Struct({
     "unsupported_resume",
   ]),
   phase: ProviderRecoveryPhase,
-  canonicalResumeCursor: Schema.optional(Schema.Unknown),
-  candidateResumeCursor: Schema.optional(Schema.Unknown),
   contextDigest: TrimmedNonEmptyString,
   contextVersion: Schema.Literal(1),
   startKey: TrimmedNonEmptyString,

@@ -463,11 +463,26 @@ export const make = Effect.gen(function* () {
     sql<{ readonly threadId: string }>`
       UPDATE provider_session_runtime
       SET candidate_recovery_id = ${input.recoveryId},
-          candidate_recovery_json = ${JSON.stringify(input.recovery)},
+          candidate_recovery_json = CASE
+            WHEN candidate_recovery_id = ${input.recoveryId}
+              AND candidate_status IN ('dispatch-committed', 'turn-started')
+            THEN candidate_recovery_json
+            ELSE ${JSON.stringify(input.recovery)}
+          END,
           candidate_resume_cursor_json = ${JSON.stringify(input.resumeCursor)},
           candidate_runtime_payload_json = ${JSON.stringify(input.runtimePayload)},
-          candidate_status = 'staged',
-          candidate_turn_id = NULL,
+          candidate_status = CASE
+            WHEN candidate_recovery_id = ${input.recoveryId}
+              AND candidate_status IN ('dispatch-committed', 'turn-started')
+            THEN candidate_status
+            ELSE 'staged'
+          END,
+          candidate_turn_id = CASE
+            WHEN candidate_recovery_id = ${input.recoveryId}
+              AND candidate_status = 'turn-started'
+            THEN candidate_turn_id
+            ELSE NULL
+          END,
           candidate_updated_at = ${input.updatedAt}
       WHERE thread_id = ${input.threadId}
         AND (candidate_recovery_id IS NULL OR candidate_recovery_id = ${input.recoveryId})

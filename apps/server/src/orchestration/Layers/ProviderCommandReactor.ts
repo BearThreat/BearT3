@@ -738,18 +738,12 @@ const make = Effect.gen(function* () {
               recovery: {
                 ...baseRecovery,
                 phase: "candidate-started",
-                ...(candidate.resumeCursor !== undefined
-                  ? { candidateResumeCursor: candidate.resumeCursor }
-                  : {}),
               },
               createdAt,
             });
             recoveredSessions.set(threadId, {
               ...baseRecovery,
               phase: "candidate-started",
-              ...(candidate.resumeCursor !== undefined
-                ? { candidateResumeCursor: candidate.resumeCursor }
-                : {}),
             });
             recoveredSessionReasons.set(threadId, error.reason);
             return candidate;
@@ -1644,6 +1638,12 @@ const make = Effect.gen(function* () {
           },
           createdAt: thread.updatedAt,
         });
+        if (providerService.rollbackCandidateSession !== undefined) {
+          yield* providerService.rollbackCandidateSession({
+            threadId: thread.id,
+            recoveryId: recovery.recoveryId,
+          });
+        }
         continue;
       }
       if (providerService.startCandidateSession === undefined) continue;

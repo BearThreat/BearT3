@@ -1,12 +1,14 @@
 import {
   CommandId,
   EventId,
+  OrchestrationReadModel,
   ProjectId,
   ProviderDriverKind,
   ThreadId,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
@@ -39,6 +41,77 @@ function makeEvent(input: {
 }
 
 describe("orchestration projector", () => {
+  it("does not project provider resume cursors into client thread snapshots", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-thread-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    const opaqueCursor = "OPAQUE-CURSOR-MUST-STAY-SERVER-ONLY";
+    const projected = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.provider-recovery-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-recovery",
+          payload: {
+            threadId: "thread-1",
+            recovery: {
+              recoveryId: "recovery-1",
+              sourceMessageId: "message-1",
+              providerInstanceId: "codex",
+              reason: "payload_too_large",
+              phase: "candidate-started",
+              canonicalResumeCursor: { opaque: opaqueCursor },
+              candidateResumeCursor: { opaque: opaqueCursor },
+              contextDigest: "context-v1",
+              contextVersion: 1,
+              startKey: "recovery-1:start",
+              dispatchKey: "recovery-1:dispatch",
+              preparedAt: now,
+              updatedAt: now,
+            },
+          },
+        }),
+      ),
+    );
+
+    const encodedSnapshot = Schema.encodeSync(Schema.fromJsonString(OrchestrationReadModel))(
+      projected,
+    );
+    expect(encodedSnapshot).not.toContain(opaqueCursor);
+    expect(encodedSnapshot).not.toContain("candidateResumeCursor");
+    expect(projected.threads[0]?.recovery).toMatchObject({
+      phase: "candidate-started",
+      reason: "payload_too_large",
+    });
+  });
+
   it("applies thread.created events", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const model = createEmptyReadModel(now);
