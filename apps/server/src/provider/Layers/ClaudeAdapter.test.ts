@@ -2029,6 +2029,10 @@ describe("ClaudeAdapterLive", () => {
           failureCount: 1,
           failureTags: ["ProviderAdapterResumeError"],
         });
+        assert.deepEqual(runtimeError.payload.resumeFailure, {
+          reason: "session_missing",
+          method: "query/resume",
+        });
       }
 
       const completed = runtimeEvents.find((event) => event.type === "turn.completed");

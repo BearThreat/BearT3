@@ -93,6 +93,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
   type ProviderAdapterError,
+  type ProviderResumeFailureReason,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -2055,6 +2056,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: string,
     cause?: unknown,
+    resumeFailure?: { readonly reason: ProviderResumeFailureReason; readonly method: string },
   ) {
     if (cause !== undefined) {
       void cause;
@@ -2065,6 +2067,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       type: "runtime.error",
       eventId: stamp.eventId,
       provider: PROVIDER,
+      providerInstanceId: context.session.providerInstanceId,
       createdAt: stamp.createdAt,
       threadId: context.session.threadId,
       ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
@@ -2072,6 +2075,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         message,
         class: "provider_error",
         ...(cause !== undefined ? { detail: cause } : {}),
+        ...(resumeFailure !== undefined ? { resumeFailure } : {}),
       },
       providerRefs: nativeProviderRefs(context),
     });
@@ -3663,10 +3667,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           Cause.isFailReason(reason) ? [reason.error] : [],
         );
         const message = failures[0]?.detail ?? "Claude runtime stream failed.";
-        yield* emitRuntimeError(context, message, {
-          failureCount: failures.length,
-          failureTags: failures.map((failure) => failure._tag),
-        });
+        const resumeFailure = failures.find(
+          (failure): failure is ProviderAdapterResumeError =>
+            failure._tag === "ProviderAdapterResumeError",
+        );
+        yield* emitRuntimeError(
+          context,
+          message,
+          {
+            failureCount: failures.length,
+            failureTags: failures.map((failure) => failure._tag),
+          },
+          resumeFailure
+            ? { reason: resumeFailure.reason, method: resumeFailure.method }
+            : undefined,
+        );
         yield* completeTurn(context, "failed", message);
       }
     } else if (context.turnState) {

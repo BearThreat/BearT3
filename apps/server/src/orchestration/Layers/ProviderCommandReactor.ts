@@ -71,7 +71,8 @@ type ProviderIntentEvent = Extract<
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
+      | "thread.session-stop-requested"
+      | "thread.provider-recovery-set";
   }
 >;
 
@@ -1598,6 +1599,106 @@ const make = Effect.gen(function* () {
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
+      case "thread.provider-recovery-set": {
+        const recovery = event.payload.recovery;
+        if (
+          recovery.phase !== "prepared" ||
+          providerService.startCandidateSession === undefined ||
+          providerService.sendCandidateTurn === undefined
+        ) {
+          return;
+        }
+        const thread = yield* resolveThread(event.payload.threadId);
+        if (thread === undefined) {
+          return;
+        }
+        const source = thread.messages.find((message) => message.id === recovery.sourceMessageId);
+        if (source?.role !== "user") {
+          return;
+        }
+        const project = yield* resolveProject(thread.projectId);
+        const cwd = resolveThreadWorkspaceCwd({
+          thread,
+          projects: project ? [project] : [],
+        });
+        if (providerService.prepareCandidateRecovery !== undefined) {
+          yield* providerService.prepareCandidateRecovery({
+            threadId: thread.id,
+            recoveryId: recovery.recoveryId,
+            recovery,
+          });
+        }
+        yield* appendProviderRecoveryActivity({
+          threadId: thread.id,
+          kind: "provider.session.recovery.started",
+          summary: "Rebuilding provider context",
+          reason: recovery.reason,
+          createdAt: event.occurredAt,
+        }).pipe(Effect.ignore);
+        yield* providerService.startCandidateSession({
+          recoveryId: recovery.recoveryId,
+          recovery: { ...recovery, phase: "candidate-started" },
+          session: {
+            threadId: thread.id,
+            providerInstanceId: recovery.providerInstanceId,
+            ...(cwd ? { cwd } : {}),
+            ...(thread.title ? { title: thread.title } : {}),
+            modelSelection: thread.modelSelection,
+            resumePolicy: "fresh",
+            runtimeMode: thread.runtimeMode,
+          },
+        });
+        const started = { ...recovery, phase: "candidate-started" as const };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(`${recovery.startKey}:candidate`),
+          threadId: thread.id,
+          recovery: started,
+          createdAt: event.occurredAt,
+        });
+        recoveredSessions.set(thread.id, started);
+        recoveredSessionReasons.set(thread.id, recovery.reason);
+
+        const marker = "[Current user request after provider-session recovery]";
+        const context = buildProviderRecoveryContext(
+          thread.messages,
+          recovery.sourceMessageId,
+          Math.max(0, PROVIDER_SEND_TURN_MAX_INPUT_CHARS - source.text.length - marker.length - 4),
+        );
+        const recoveredInput = context ? `${context}\n\n${marker}\n${source.text}` : source.text;
+        const committed = { ...started, phase: "dispatch-committed" as const };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(recovery.dispatchKey),
+          threadId: thread.id,
+          recovery: committed,
+          createdAt: event.occurredAt,
+        });
+        const result = yield* providerService.sendCandidateTurn({
+          recoveryId: recovery.recoveryId,
+          turn: {
+            threadId: thread.id,
+            input: recoveredInput,
+            ...(source.attachments !== undefined ? { attachments: source.attachments } : {}),
+            modelSelection: thread.modelSelection,
+            interactionMode: thread.interactionMode,
+          },
+        });
+        const turnStarted = {
+          ...committed,
+          phase: "turn-started" as const,
+          candidateTurnId: result.turnId,
+        };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(`${recovery.dispatchKey}:started`),
+          threadId: thread.id,
+          recovery: turnStarted,
+          createdAt: event.occurredAt,
+        });
+        recoveredSessions.set(thread.id, turnStarted);
+        return;
+      }
     }
   });
 
@@ -1732,7 +1833,8 @@ const make = Effect.gen(function* () {
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
+        event.type === "thread.session-stop-requested" ||
+        event.type === "thread.provider-recovery-set"
       ) {
         return yield* worker.enqueue(event);
       }

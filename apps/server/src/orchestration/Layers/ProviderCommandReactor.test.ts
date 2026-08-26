@@ -2166,6 +2166,80 @@ describe("ProviderCommandReactor", () => {
     NodeFS.rmSync(recoveryCwd, { recursive: true, force: true });
   });
 
+  it("dispatches one bounded fresh candidate for an async provider resume failure", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const messageId = asMessageId("user-message-async-resume");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-async-resume-original"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "Continue this pending request once.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    const recovery = {
+      recoveryId: `recovery:${threadId}:${messageId}`,
+      sourceMessageId: messageId,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      reason: "session_missing" as const,
+      phase: "prepared" as const,
+      contextDigest: `context-v1:${threadId}:${messageId}`,
+      contextVersion: 1 as const,
+      startKey: `recovery:${threadId}:${messageId}:start`,
+      dispatchKey: `recovery:${threadId}:${messageId}:dispatch`,
+      preparedAt: now,
+      updatedAt: now,
+    };
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(recovery.startKey),
+        threadId,
+        recovery,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls).toHaveLength(2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+    const candidate = harness.sendTurn.mock.calls[1]?.[0] as { input: string };
+    expect(candidate.input.length).toBeLessThanOrEqual(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(candidate.input).toContain("[Current user request after provider-session recovery]");
+    expect(candidate.input.match(/Continue this pending request once\./g)).toHaveLength(1);
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(recovery.startKey),
+        threadId,
+        recovery,
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.startSession.mock.calls).toHaveLength(2);
+    expect(harness.sendTurn.mock.calls).toHaveLength(2);
+  });
+
   it("does not resend a dispatch-committed recovery after restart", async () => {
     const harness = await createHarness({ recoveryBeforeStartPhase: "dispatch-committed" });
     expect(harness.sendTurn.mock.calls).toHaveLength(0);

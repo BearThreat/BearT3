@@ -37,7 +37,7 @@ The classifiers are conservative. An unknown error stays a request or process er
 - ACP classification is shared because Cursor and Grok use the same `effect-acp` session-load contract.
 - ACP classification runs only when BearT3 supplied a valid resume session ID.
 - OpenCode no longer converts a confirmed missing session into an empty session inside the adapter. Orchestration must own that recovery decision and context handoff.
-- Claude classifies missing-session and stale-session failures during query construction and asynchronous query consumption. Other asynchronous failures remain process errors.
+- Claude classifies missing-session and stale-session failures during query construction and asynchronous query consumption. An asynchronous typed failure carries its reason through the runtime event contract. Ingestion resolves the failed turn's user message and writes one durable `prepared` recovery generation. The command reactor then starts one fresh candidate and sends that message once with bounded BearT3 context. Other asynchronous failures remain process errors and do not start recovery.
 - No adapter classifies an error as oversized or decode-related without a stable structured protocol signal.
 
 ## Reproduction
