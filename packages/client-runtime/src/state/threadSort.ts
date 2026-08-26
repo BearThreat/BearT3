@@ -15,6 +15,7 @@ export interface ThreadSortInput {
 
 export interface ConversationActivitySortInput {
   readonly createdAt: string;
+  readonly unsettledAt?: string | null;
   readonly latestUserMessageAt?: string | null;
   readonly latestTurn?: {
     readonly completedAt?: string | null;
@@ -42,9 +43,7 @@ export function getConversationActivityTimestamp(thread: ConversationActivitySor
   return Math.max(
     userMessageAt ?? Number.NEGATIVE_INFINITY,
     agentFinalAt ?? Number.NEGATIVE_INFINITY,
-    ...(userMessageAt === null && agentFinalAt === null
-      ? [toSortableTimestamp(thread.createdAt) ?? Number.NEGATIVE_INFINITY]
-      : []),
+    activeThreadAnchorTimestampMs(thread),
   );
 }
 
@@ -128,6 +127,24 @@ export function getThreadSortTimestamp(
     );
   }
   return getLatestUserMessageTimestamp(thread);
+}
+
+/**
+ * Sort anchor for the active thread list: creation time, re-anchored to
+ * unsettledAt when the thread last re-entered the active list (an explicit
+ * un-settle, or a settled thread waking on activity). The list stays static
+ * between lifecycle transitions, but an un-settled thread surfaces at the
+ * top instead of sinking back to its creation-order slot. Shared by web and
+ * mobile so both render the same order. Malformed timestamps sink to 0.
+ */
+export function activeThreadAnchorTimestampMs(thread: {
+  readonly createdAt: string;
+  readonly unsettledAt?: string | null | undefined;
+}): number {
+  return Math.max(
+    toSortableTimestamp(thread.createdAt) ?? 0,
+    toSortableTimestamp(thread.unsettledAt ?? undefined) ?? 0,
+  );
 }
 
 export function sortThreads<T extends { readonly id: string } & ThreadSortInput>(

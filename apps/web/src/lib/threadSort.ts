@@ -1,4 +1,5 @@
 export {
+  activeThreadAnchorTimestampMs,
   getConversationActivityTimestamp,
   hasLiveThreadWork,
   getLatestThreadForProject,

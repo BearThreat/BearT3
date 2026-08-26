@@ -542,7 +542,8 @@ export function firstValidTimestamp(
 }
 
 // Active chats follow conversation recency. Incidental metadata updates do
-// not move a row; only a user message or completed agent turn does.
+// not move a row. A user message, completed agent turn, or transition back
+// from settled work does. Live work remains above completed chats.
 export function sortThreadsForSidebar<
   T extends {
     readonly id: string;
@@ -551,6 +552,7 @@ export function sortThreadsForSidebar<
     readonly latestTurn?: { readonly completedAt?: string | null } | null;
     readonly session?: { readonly status: string } | null;
     readonly backgroundLiveness?: "working" | "monitoring" | null | undefined;
+    readonly unsettledAt?: string | null | undefined;
   },
 >(threads: readonly T[]): T[] {
   return sortThreadsByConversationActivity<T>(threads);
