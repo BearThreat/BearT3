@@ -160,6 +160,7 @@ describe("ProviderCommandReactor", () => {
       | "candidate-started"
       | "dispatch-committed"
       | "turn-started";
+    readonly omitRecoveryProjectionBeforeStart?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
@@ -502,17 +503,22 @@ describe("ProviderCommandReactor", () => {
         preparedAt: now,
         updatedAt: now,
       };
-      await Effect.runPromise(
-        engine.dispatch({
-          type: "thread.provider-recovery.set",
-          commandId: CommandId.make(recovery.startKey),
-          threadId: ThreadId.make("thread-1"),
-          recovery,
-          createdAt: now,
-        }),
-      );
+      if (input.omitRecoveryProjectionBeforeStart !== true) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(recovery.startKey),
+            threadId: ThreadId.make("thread-1"),
+            recovery,
+            createdAt: now,
+          }),
+        );
+      }
       const candidateRecovery = { ...recovery, phase: "candidate-started" as const };
-      if (input.recoveryBeforeStartPhase !== "prepared") {
+      if (
+        input.omitRecoveryProjectionBeforeStart !== true &&
+        input.recoveryBeforeStartPhase !== "prepared"
+      ) {
         await Effect.runPromise(
           engine.dispatch({
             type: "thread.provider-recovery.set",
@@ -525,8 +531,9 @@ describe("ProviderCommandReactor", () => {
       }
       const dispatchRecovery = { ...candidateRecovery, phase: "dispatch-committed" as const };
       if (
-        input.recoveryBeforeStartPhase === "dispatch-committed" ||
-        input.recoveryBeforeStartPhase === "turn-started"
+        input.omitRecoveryProjectionBeforeStart !== true &&
+        (input.recoveryBeforeStartPhase === "dispatch-committed" ||
+          input.recoveryBeforeStartPhase === "turn-started")
       ) {
         await Effect.runPromise(
           engine.dispatch({
@@ -543,7 +550,10 @@ describe("ProviderCommandReactor", () => {
         phase: "turn-started" as const,
         candidateTurnId: asTurnId("candidate-turn-before-restart"),
       };
-      if (input.recoveryBeforeStartPhase === "turn-started") {
+      if (
+        input.omitRecoveryProjectionBeforeStart !== true &&
+        input.recoveryBeforeStartPhase === "turn-started"
+      ) {
         await Effect.runPromise(
           engine.dispatch({
             type: "thread.provider-recovery.set",
@@ -2285,6 +2295,18 @@ describe("ProviderCommandReactor", () => {
           event.payload.recovery.phase === "prepared",
       ),
     ).toBe(true);
+  });
+
+  it("rolls back a dispatch-committed candidate when its projection is missing", async () => {
+    const harness = await createHarness({
+      recoveryBeforeStartPhase: "dispatch-committed",
+      omitRecoveryProjectionBeforeStart: true,
+    });
+
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+    expect(harness.recoveryCandidateCount).toBe(0);
+    await harness.restartReactor();
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
   });
 
   it("dispatches one candidate-started recovery after restart", async () => {

@@ -1730,19 +1730,21 @@ const make = Effect.gen(function* () {
       const thread = snapshot.threads.find((entry) => entry.id === candidate.threadId);
       if (thread === undefined) continue;
       if (candidate.status === "dispatch-committed") {
-        yield* orchestrationEngine.dispatch({
-          type: "thread.provider-recovery.set",
-          commandId: CommandId.make(`${recovery.recoveryId}:uncertain`),
-          threadId: thread.id,
-          recovery: {
-            ...recovery,
-            phase: "failed",
-            failure:
-              "Provider delivery outcome is uncertain after restart; automatic resend was suppressed.",
-            updatedAt: thread.updatedAt,
-          },
-          createdAt: thread.updatedAt,
-        });
+        yield* orchestrationEngine
+          .dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.recoveryId}:uncertain`),
+            threadId: thread.id,
+            recovery: {
+              ...recovery,
+              phase: "failed",
+              failure:
+                "Provider delivery outcome is uncertain after restart; automatic resend was suppressed.",
+              updatedAt: thread.updatedAt,
+            },
+            createdAt: thread.updatedAt,
+          })
+          .pipe(Effect.ignore);
         if (providerService.rollbackCandidateSession !== undefined) {
           yield* providerService.rollbackCandidateSession({
             threadId: thread.id,
