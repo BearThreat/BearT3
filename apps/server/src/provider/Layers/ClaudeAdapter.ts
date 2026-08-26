@@ -254,6 +254,7 @@ interface ClaudeSessionContext {
    * effort override inherit this. */
   currentEffort: string | undefined;
   resumeSessionId: string | undefined;
+  readonly resuming: boolean;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{
@@ -331,8 +332,10 @@ function toMessage(cause: unknown, fallback: string): string {
   return fallback;
 }
 
+type ClaudeStreamError = ProviderAdapterProcessError | ProviderAdapterResumeError;
+
 function normalizeClaudeStreamMessages(
-  cause: Cause.Cause<ProviderAdapterProcessError>,
+  cause: Cause.Cause<ClaudeStreamError>,
 ): ReadonlyArray<string> {
   const errors: Array<string> = [];
   for (const error of Cause.prettyErrors(cause)) {
@@ -366,7 +369,7 @@ function isClaudeInterruptedMessage(message: string): boolean {
   );
 }
 
-function isClaudeInterruptedCause(cause: Cause.Cause<ProviderAdapterProcessError>): boolean {
+function isClaudeInterruptedCause(cause: Cause.Cause<ClaudeStreamError>): boolean {
   return (
     Cause.hasInterruptsOnly(cause) ||
     normalizeClaudeStreamMessages(cause).some(isClaudeInterruptedMessage) ||
@@ -1541,14 +1544,9 @@ function toRequestError(threadId: ThreadId, method: string, cause: unknown): Pro
   });
 }
 
-function toClaudeStartError(
-  threadId: ThreadId,
-  hasResumeCursor: boolean,
-  cause: unknown,
-): ProviderAdapterProcessError | ProviderAdapterResumeError {
+function classifyClaudeResumeError(cause: unknown): ProviderAdapterResumeError | undefined {
   const message = toMessage(cause, "").trim().toLowerCase();
   if (
-    hasResumeCursor &&
     /(?:unknown|missing|invalid) session|session (?:was )?not found|session .*does not exist/.test(
       message,
     )
@@ -1561,7 +1559,7 @@ function toClaudeStartError(
       cause,
     });
   }
-  if (hasResumeCursor && /(?:expired|stale) session|session (?:has )?expired/.test(message)) {
+  if (/(?:expired|stale) session|session (?:has )?expired/.test(message)) {
     return new ProviderAdapterResumeError({
       provider: PROVIDER,
       method: "query/resume",
@@ -1569,6 +1567,18 @@ function toClaudeStartError(
       detail: "Claude rejected the persisted provider session as stale.",
       cause,
     });
+  }
+  return undefined;
+}
+
+function toClaudeStartError(
+  threadId: ThreadId,
+  hasResumeCursor: boolean,
+  cause: unknown,
+): ProviderAdapterProcessError | ProviderAdapterResumeError {
+  const resumeError = hasResumeCursor ? classifyClaudeResumeError(cause) : undefined;
+  if (resumeError) {
+    return resumeError;
   }
   return new ProviderAdapterProcessError({
     provider: PROVIDER,
@@ -3606,19 +3616,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const runSdkStream = (
-    context: ClaudeSessionContext,
-  ): Effect.Effect<void, ProviderAdapterProcessError> =>
-    Stream.fromAsyncIterable(
-      context.query,
-      (cause) =>
+  const runSdkStream = (context: ClaudeSessionContext): Effect.Effect<void, ClaudeStreamError> =>
+    Stream.fromAsyncIterable(context.query, (cause) => {
+      const resumeError = context.resuming ? classifyClaudeResumeError(cause) : undefined;
+      return (
+        resumeError ??
         new ProviderAdapterProcessError({
           provider: PROVIDER,
           threadId: context.session.threadId,
           detail: "Claude runtime stream failed.",
           cause,
-        }),
-    ).pipe(
+        })
+      );
+    }).pipe(
       Stream.takeWhile(() => !context.stopped),
       Stream.runForEach((message) =>
         handleSdkMessage(context, message).pipe(
@@ -3637,7 +3647,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const handleStreamExit = Effect.fn("handleStreamExit")(function* (
     context: ClaudeSessionContext,
-    exit: Exit.Exit<void, ProviderAdapterProcessError>,
+    exit: Exit.Exit<void, ClaudeStreamError>,
   ) {
     if (context.stopped) {
       return;
@@ -4293,6 +4303,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         currentApiModelId: apiModelId,
         currentEffort: effectiveEffort ?? undefined,
         resumeSessionId: sessionId,
+        resuming: existingResumeSessionId !== undefined,
         pendingApprovals,
         pendingUserInputs,
         turns: [],
