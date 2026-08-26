@@ -641,14 +641,9 @@ function mapCollabAgentEvent(
           },
         ];
       }
-      // interacted → the child is (again) actively driven.
-      return [
-        {
-          ...base,
-          type: "task.updated",
-          payload: { taskId, status: "running", ...statusLinkage },
-        },
-      ];
+      // Reading an idle child's result also emits "interacted". Only the
+      // child's turn or thread lifecycle can prove that it resumed work.
+      return [];
     }
     case "collabAgent/turnStarted":
       return [

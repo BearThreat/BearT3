@@ -59,6 +59,8 @@ export class ThreadBackgroundLivenessService extends Context.Service<
       readonly status: string | undefined;
       readonly kind: "started" | "progress" | "updated" | "completed";
       readonly agentId?: string | undefined;
+      readonly eventCreatedAt?: string | undefined;
+      readonly latestTurnCompletedAt?: string | null | undefined;
     }) => void;
 
     /** Session death orphans all of a thread's background work. */
@@ -127,6 +129,19 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
         (input.status !== undefined && TERMINAL_STATUSES.has(input.status));
       if (terminal) {
         drop(input.threadId, input.taskId);
+        return;
+      }
+
+      // Providers may replay historical task events while resuming an idle
+      // session. An event older than the latest completed turn cannot prove
+      // that background work is live now.
+      const eventAt = Date.parse(input.eventCreatedAt ?? "");
+      const latestTurnCompletedAt = Date.parse(input.latestTurnCompletedAt ?? "");
+      if (
+        Number.isFinite(eventAt) &&
+        Number.isFinite(latestTurnCompletedAt) &&
+        eventAt <= latestTurnCompletedAt
+      ) {
         return;
       }
 

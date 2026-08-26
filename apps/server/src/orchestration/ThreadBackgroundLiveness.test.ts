@@ -2,6 +2,34 @@ import { describe, expect, it } from "vite-plus/test";
 import * as ThreadBackgroundLiveness from "./ThreadBackgroundLiveness.ts";
 
 describe("ThreadBackgroundLiveness", () => {
+  it("ignores replayed non-terminal task events older than the latest completed turn", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    liveness.recordTaskLiveness({
+      threadId: "dead-thread",
+      taskId: "historical-task",
+      taskType: "agent",
+      status: "running",
+      kind: "updated",
+      eventCreatedAt: "2026-08-20T12:00:00.000Z",
+      latestTurnCompletedAt: "2026-08-20T12:01:00.000Z",
+    });
+    expect(liveness.getThreadBackgroundLiveness("dead-thread")).toBeNull();
+  });
+
+  it("accepts background task events newer than the latest completed turn", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    liveness.recordTaskLiveness({
+      threadId: "live-thread",
+      taskId: "background-task",
+      taskType: "agent",
+      status: "running",
+      kind: "updated",
+      eventCreatedAt: "2026-08-20T12:02:00.000Z",
+      latestTurnCompletedAt: "2026-08-20T12:01:00.000Z",
+    });
+    expect(liveness.getThreadBackgroundLiveness("live-thread")).toBe("working");
+  });
+
   it("agents present as working; monitors as monitoring; agents win", () => {
     const liveness = ThreadBackgroundLiveness.make();
     const threadId = "t-live-1";
