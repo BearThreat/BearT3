@@ -1,0 +1,18 @@
+name: salvo-runtime
+description: Prepare the immutable Salvo runtime without first-boot configuration.
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: PrepareRuntime
+        action: ExecuteBash
+        inputs:
+          commands:
+            - sudo /opt/salvo/image/prepare-image.sh
+  - name: validate
+    steps:
+      - name: ValidateRuntime
+        action: ExecuteBash
+        inputs:
+          commands:
+            - sudo /opt/salvo/image/validate-image.sh --installed

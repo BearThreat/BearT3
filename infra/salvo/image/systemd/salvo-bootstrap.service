@@ -1,0 +1,17 @@
+[Unit]
+Description=Redeem Salvo one-time sandbox bootstrap capability
+After=network-online.target cloud-final.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/salvo-bootstrap
+RemainAfterExit=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/salvo /run/salvo /var/lib/salvo
+
+[Install]
+WantedBy=multi-user.target

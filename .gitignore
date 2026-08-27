@@ -15,6 +15,7 @@ build/
 release/
 release-mock/
 .t3
+.deploy/
 .idea/
 apps/web/.playwright
 apps/web/playwright-report
@@ -36,3 +37,7 @@ node_modules/
 *.log
 .env*
 !.env.example
+# Local Salvo AWS targets and notification addresses
+infra/salvo/aws/parameters.json
+.salvo-build/
+__pycache__/

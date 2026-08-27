@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://barrettvelker.com/salvo/sandbox-state.schema.json",
+  "title": "Salvo sandbox observed state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "userId", "instance", "volume", "image", "service"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "userId": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state", "hibernationConfigured"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "state": {
+          "enum": [
+            "absent",
+            "pending",
+            "running",
+            "stopping",
+            "stopped",
+            "hibernating",
+            "hibernated",
+            "terminated",
+            "unknown"
+          ]
+        },
+        "hibernationConfigured": { "type": "boolean" }
+      }
+    },
+    "volume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "attached", "encrypted"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "attached": { "type": "boolean" },
+        "encrypted": { "type": "boolean" }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "release", "verified"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "release": { "type": ["string", "null"] },
+        "verified": { "type": "boolean" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ready", "tunnelConnected", "checkedAt"],
+      "properties": {
+        "ready": { "type": "boolean" },
+        "tunnelConnected": { "type": "boolean" },
+        "checkedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

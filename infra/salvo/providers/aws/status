@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v aws >/dev/null 2>&1; then
+  printf '%s\n' '{"error":"aws_cli_unavailable"}'
+  exit 2
+fi
+
+region="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+if ! raw="$(timeout 15s aws ec2 describe-instances --region "$region" --filters Name=tag:Application,Values=Salvo --query 'Reservations[].Instances[].{state:State.Name,instanceType:InstanceType,launchTime:LaunchTime}' --output json 2>/dev/null)"; then
+  printf '%s\n' '{"error":"aws_status_unavailable"}'
+  exit 3
+fi
+
+jq -cn --arg region "$region" --argjson instances "$raw" '{provider:"aws",region:$region,resourceClass:"salvo-tagged-instances",count:($instances|length),states:($instances|group_by(.state)|map({key:.[0].state,value:length})|from_entries),instances:$instances}'

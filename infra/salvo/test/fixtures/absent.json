@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "userId": "family_2",
+  "instance": { "id": null, "state": "absent", "hibernationConfigured": false },
+  "volume": { "id": "vol-retained", "attached": false, "encrypted": true },
+  "image": { "id": "ami-example", "release": "salvo-0.1.0", "verified": true },
+  "service": { "ready": false, "tunnelConnected": false, "checkedAt": null }
+}

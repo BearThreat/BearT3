@@ -1,0 +1,28 @@
+[Unit]
+Description=Salvo sandbox server and prompt receiver
+After=network-online.target salvo-bootstrap.service
+Wants=network-online.target
+Requires=salvo-bootstrap.service
+RequiresMountsFor=/var/lib/salvo
+ConditionPathExists=/etc/salvo/sandbox.env
+
+[Service]
+Type=simple
+User=salvo
+Group=salvo
+EnvironmentFile=/etc/salvo/sandbox.env
+Environment=PATH=/opt/salvo/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+ExecStart=/opt/salvo/runtime/node/bin/node /opt/salvo/server/dist/sandbox-runtime.mjs
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=45
+TimeoutStopSec=130
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/salvo /var/log/salvo
+
+[Install]
+WantedBy=multi-user.target

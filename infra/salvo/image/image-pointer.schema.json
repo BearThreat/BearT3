@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Promoted Salvo image pointer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "release",
+    "amiId",
+    "region",
+    "manifestSha256",
+    "skillReleaseSha256",
+    "verifiedAt",
+    "previousRelease"
+  ],
+  "properties": {
+    "release": { "type": "string", "minLength": 1 },
+    "amiId": { "type": "string", "pattern": "^ami-[0-9a-f]+$" },
+    "region": { "type": "string", "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$" },
+    "manifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "skillReleaseSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "verifiedAt": { "type": "string", "format": "date-time" },
+    "previousRelease": { "type": ["string", "null"] }
+  }
+}

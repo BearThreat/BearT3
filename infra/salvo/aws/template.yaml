@@ -1,0 +1,317 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Salvo family-pilot sandbox foundation (no inbound network access).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: family-pilot
+    AllowedPattern: "[a-z0-9-]{3,32}"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  PromotedAmiParameterName:
+    Type: String
+    Default: /salvo/family-pilot/promoted-ami
+    AllowedPattern: "/[A-Za-z0-9_./-]+"
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large]
+  RootVolumeGiB:
+    Type: Number
+    Default: 40
+    MinValue: 20
+    MaxValue: 200
+  RootVolumeIops:
+    Type: Number
+    Default: 3000
+    MinValue: 3000
+    MaxValue: 16000
+  RootVolumeThroughput:
+    Type: Number
+    Default: 125
+    MinValue: 125
+    MaxValue: 1000
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90, 180, 365]
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 75
+    MinValue: 1
+  BillingAlertEmail:
+    Type: String
+    Default: ""
+    NoEcho: true
+
+Conditions:
+  HasBillingAlertEmail: !Not [!Equals [!Ref BillingAlertEmail, ""]]
+
+Resources:
+  ControlPlaneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Salvo control plane outbound HTTPS only; no inbound rules
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: AWS APIs and Salvo service dependencies
+      Tags:
+        - { Key: salvo:managed, Value: "true" }
+        - { Key: salvo:environment, Value: !Ref EnvironmentName }
+        - { Key: salvo:role, Value: control-plane }
+
+  SandboxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Salvo sandbox outbound HTTPS only; no inbound rules
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS for SSM, Salvo relay, package and model endpoints
+      Tags:
+        - { Key: salvo:managed, Value: "true" }
+        - { Key: salvo:environment, Value: !Ref EnvironmentName }
+        - { Key: salvo:role, Value: sandbox }
+
+  SandboxRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Runtime identity for isolated Salvo sandboxes
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - { Key: salvo:managed, Value: "true" }
+        - { Key: salvo:environment, Value: !Ref EnvironmentName }
+
+  SandboxInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref SandboxRole]
+
+  SandboxLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /salvo/${EnvironmentName}/sandboxes
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - { Key: salvo:managed, Value: "true" }
+        - { Key: salvo:environment, Value: !Ref EnvironmentName }
+
+  SandboxErrorMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref SandboxLogGroup
+      FilterPattern: "?ERROR ?Error ?error ?FATAL ?Fatal ?fatal"
+      MetricTransformations:
+        - MetricNamespace: Salvo/Sandboxes
+          MetricName: !Sub ${EnvironmentName}-errors
+          MetricValue: "1"
+          DefaultValue: 0
+
+  SandboxErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub Salvo ${EnvironmentName} sandbox errors detected
+      Namespace: Salvo/Sandboxes
+      MetricName: !Sub ${EnvironmentName}-errors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub Salvo ${EnvironmentName} sandbox data encryption
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" }
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - { Key: salvo:managed, Value: "true" }
+        - { Key: salvo:environment, Value: !Ref EnvironmentName }
+
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/salvo-${EnvironmentName}
+      TargetKeyId: !Ref DataKey
+
+  SandboxLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub salvo-${EnvironmentName}-sandbox
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - { Key: salvo:managed, Value: "true" }
+            - { Key: salvo:environment, Value: !Ref EnvironmentName }
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:${PromotedAmiParameterName}}}"
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Name: !Ref SandboxInstanceProfile }
+        SecurityGroupIds: [!Ref SandboxSecurityGroup]
+        HibernationOptions: { Configured: true }
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: enabled
+        Monitoring: { Enabled: true }
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              DeleteOnTermination: false
+              Encrypted: true
+              KmsKeyId: !GetAtt DataKey.Arn
+              VolumeType: gp3
+              VolumeSize: !Ref RootVolumeGiB
+              Iops: !Ref RootVolumeIops
+              Throughput: !Ref RootVolumeThroughput
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: false
+            DeleteOnTermination: true
+            Groups: [!Ref SandboxSecurityGroup]
+            SubnetId: !Ref SubnetId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub salvo-${EnvironmentName}-sandbox
+              - { Key: salvo:managed, Value: "true" }
+              - { Key: salvo:environment, Value: !Ref EnvironmentName }
+              - { Key: salvo:lifecycle, Value: on-demand }
+          - ResourceType: volume
+            Tags:
+              - { Key: salvo:managed, Value: "true" }
+              - { Key: salvo:environment, Value: !Ref EnvironmentName }
+              - { Key: salvo:persistence, Value: user-data }
+
+  LifecyclePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Tagged Salvo instance lifecycle operations; creation is launch-template-bound
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadSandboxState
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - ec2:DescribeLaunchTemplates
+              - ec2:DescribeLaunchTemplateVersions
+              - ssm:DescribeInstanceInformation
+              - ssm:GetCommandInvocation
+            Resource: "*"
+          - Sid: OperateTaggedSandboxes
+            Effect: Allow
+            Action:
+              - ec2:StartInstances
+              - ec2:StopInstances
+              - ec2:RebootInstances
+              - ec2:TerminateInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/salvo:managed: "true"
+                aws:ResourceTag/salvo:environment: !Ref EnvironmentName
+          - Sid: RebootstrapTaggedSandboxesThroughSsm
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ssm:resourceTag/salvo:managed: "true"
+                ssm:resourceTag/salvo:environment: !Ref EnvironmentName
+          - Sid: UseOnlyRunShellScriptForRebootstrap
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+          - Sid: LaunchOnlyFromSalvoTemplate
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: "*"
+            Condition:
+              ArnEquals:
+                ec2:LaunchTemplate: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/${SandboxLaunchTemplate}
+              StringEquals:
+                aws:RequestTag/salvo:managed: "true"
+                aws:RequestTag/salvo:environment: !Ref EnvironmentName
+          - Sid: RequireTagsOnLaunch
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource: "*"
+            Condition:
+              StringEquals: { ec2:CreateAction: RunInstances }
+          - Sid: PassOnlySandboxRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt SandboxRole.Arn
+            Condition:
+              StringEquals: { iam:PassedToService: ec2.amazonaws.com }
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Condition: HasBillingAlertEmail
+    Properties:
+      Budget:
+        BudgetName: !Sub salvo-${EnvironmentName}-monthly
+        BudgetLimit: { Amount: !Ref MonthlyBudgetUsd, Unit: USD }
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        CostFilters:
+          TagKeyValue:
+            - !Sub "user:salvo:environment$${EnvironmentName}"
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: FORECASTED
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref BillingAlertEmail }
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref BillingAlertEmail }
+
+Outputs:
+  ControlPlaneSecurityGroupId: { Value: !Ref ControlPlaneSecurityGroup }
+  LaunchTemplateId: { Value: !Ref SandboxLaunchTemplate }
+  LaunchTemplateVersion: { Value: !GetAtt SandboxLaunchTemplate.LatestVersionNumber }
+  SandboxRoleArn: { Value: !GetAtt SandboxRole.Arn }
+  LifecyclePolicyArn: { Value: !Ref LifecyclePolicy }
+  LogGroupName: { Value: !Ref SandboxLogGroup }
+  SecurityGroupId: { Value: !Ref SandboxSecurityGroup }
+  PromotedAmiParameterName: { Value: !Ref PromotedAmiParameterName }

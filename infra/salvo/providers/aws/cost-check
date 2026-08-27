@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v aws >/dev/null 2>&1; then
+  printf '%s\n' '{"error":"aws_cli_unavailable"}'
+  exit 2
+fi
+
+start="$(date -u -d '7 days ago' +%F)"
+end="$(date -u -d 'tomorrow' +%F)"
+if ! raw="$(timeout 15s aws ce get-cost-and-usage --time-period "Start=$start,End=$end" --granularity MONTHLY --metrics UnblendedCost --filter '{"Tags":{"Key":"Application","Values":["Salvo"]}}' --output json 2>/dev/null)"; then
+  printf '%s\n' '{"error":"aws_cost_unavailable"}'
+  exit 3
+fi
+
+jq -cn --arg start "$start" --arg end "$end" --argjson source "$raw" '{provider:"aws",scope:"Application=Salvo",period:{start:$start,end:$end},amount:($source.ResultsByTime[0].Total.UnblendedCost.Amount // "0"),unit:($source.ResultsByTime[0].Total.UnblendedCost.Unit // "USD"),estimated:($source.ResultsByTime[0].Estimated // true)}'

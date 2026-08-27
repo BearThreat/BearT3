@@ -1,0 +1,14 @@
+{
+  "stackName": "salvo-family-pilot",
+  "region": "us-east-1",
+  "parameters": [
+    { "key": "EnvironmentName", "value": "family-pilot" },
+    { "key": "VpcId", "value": "vpc-REPLACE" },
+    { "key": "SubnetId", "value": "subnet-REPLACE" },
+    { "key": "PromotedAmiParameterName", "value": "/salvo/family-pilot/promoted-ami" },
+    { "key": "InstanceType", "value": "t3.medium" },
+    { "key": "RootVolumeGiB", "value": "40" },
+    { "key": "MonthlyBudgetUsd", "value": "75" },
+    { "key": "BillingAlertEmail", "value": "" }
+  ]
+}

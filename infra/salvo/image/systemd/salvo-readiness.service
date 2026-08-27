@@ -1,0 +1,14 @@
+[Unit]
+Description=Salvo sandbox readiness probe
+After=network-online.target amazon-ssm-agent.service salvo.service salvo-tunnel.service
+Wants=network-online.target amazon-ssm-agent.service
+Requires=salvo.service salvo-tunnel.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/salvo/image/readiness-check.sh
+RemainAfterExit=yes
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

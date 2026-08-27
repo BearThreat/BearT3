@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "version": "2026.5.2",
+  "platform": "linux-x64",
+  "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.5.2/cloudflared-linux-amd64",
+  "sha256": "5286698547f03df745adb2355f04c12dde52ef425491e81f433642d695521886"
+}

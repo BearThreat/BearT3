@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "name": "salvo-sandbox",
+  "architecture": "x86_64",
+  "baseImage": "resolve-at-build:latest-approved-amazon-linux-2023-x86_64",
+  "rootVolumeGiB": 40,
+  "rootVolumeEncrypted": true,
+  "rootVolumeType": "gp3",
+  "bootMode": "uefi-preferred",
+  "cloudInitRuntimeConfiguration": "bootstrap-payload-only",
+  "inboundAccess": "none",
+  "management": "ssm-outbound-only",
+  "runtimeUser": "salvo",
+  "readinessEndpoint": "http://127.0.0.1:4318/ready",
+  "skillRelease": {
+    "path": "skills-release.json",
+    "sha256": "7f916bc72e51b7b9d6faa47be69fd25c71a61245a97e203953a59bb1379f9e2a"
+  },
+  "hibernation": {
+    "configuredAtLaunch": true,
+    "encryptedRootRequired": true,
+    "minimumRootGiB": 40,
+    "allowedInstanceTypes": ["t3.medium"]
+  },
+  "requiredImageTests": [
+    "ssm-agent-enabled",
+    "salvo-readiness-enabled",
+    "salvo-runtime-enabled",
+    "salvo-tunnel-enabled",
+    "cloudflared-release-hash",
+    "no-listening-public-sockets",
+    "skill-release-hash",
+    "cloud-init-bootstrap-only"
+  ]
+}

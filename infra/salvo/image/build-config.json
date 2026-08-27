@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "artifactName": "salvo-ami-payload",
+  "serverBundle": "apps/server/dist/sandbox-runtime.mjs",
+  "nodeBinary": "auto",
+  "codexPackage": "auto",
+  "cloudflaredBinary": ".salvo-build/downloads/cloudflared-linux-amd64",
+  "skillsDirectory": "auto",
+  "artifactDirectory": ".salvo-build/image-stage"
+}
