@@ -2116,7 +2116,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.stopSession.mock.calls.length).toBe(0);
   });
 
-  it("starts fresh once and prepends bounded history when provider resume is too large", async () => {
+  it("starts a synthetic restart turn once and enters provider recovery once", async () => {
     const recoveryCwd = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "provider-recovery-reference-"),
     );
@@ -2172,10 +2172,10 @@ describe("ProviderCommandReactor", () => {
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
-        commandId: CommandId.make("cmd-recovery-second"),
+        commandId: CommandId.make("thread-recovery:thread-1:turn-interrupted"),
         threadId: ThreadId.make("thread-1"),
         message: {
-          messageId: asMessageId("user-message-recovery-second"),
+          messageId: asMessageId("server:thread-recovery:thread-1:turn-interrupted"),
           role: "user",
           text: "Continue from there.",
           attachments: [],

@@ -10,6 +10,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import { OrchestrationCommandInvariantError } from "./orchestration/Errors.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
@@ -61,15 +62,16 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
 const queryWithThreads = (threads: ReadonlyArray<ReturnType<typeof makeThread>>) =>
   ({
     getCommandReadModel: () => Effect.succeed({ threads } as never),
+    getShellSnapshot: () => Effect.succeed({ threads: [] } as never),
   }) as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
 
 const runReconciliation = (input: {
   readonly threads: ReadonlyArray<ReturnType<typeof makeThread>>;
   readonly liveThreadIds?: ReadonlyArray<ThreadId>;
-  readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
+  readonly directory: Partial<ProviderSessionDirectory.ProviderSessionDirectory["Service"]>;
   readonly dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"];
 }) =>
-  ServerRuntimeStartup.reconcileProviderSessions.pipe(
+  Effect.scoped(ServerRuntimeStartup.reconcileProviderSessions()).pipe(
     Effect.provideService(
       ProjectionSnapshotQuery.ProjectionSnapshotQuery,
       queryWithThreads(input.threads),
@@ -78,7 +80,10 @@ const runReconciliation = (input: {
       ProviderService.ProviderService,
       makeProviderService(input.liveThreadIds),
     ),
-    Effect.provideService(ProviderSessionDirectory.ProviderSessionDirectory, input.directory),
+    Effect.provideService(
+      ProviderSessionDirectory.ProviderSessionDirectory,
+      input.directory as ProviderSessionDirectory.ProviderSessionDirectory["Service"],
+    ),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
       readEvents: () => Stream.empty,
       dispatch: input.dispatch,
@@ -265,8 +270,13 @@ it.effect("retries failed projections and continues after a persistent failure",
 
 it.effect("does not fail startup when the live provider session inventory cannot be read", () => {
   let queried = false;
-  return ServerRuntimeStartup.reconcileProviderSessions.pipe(
+  return Effect.scoped(ServerRuntimeStartup.reconcileProviderSessions()).pipe(
     Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+      getShellSnapshot: () =>
+        Effect.sync(() => {
+          queried = true;
+          return { threads: [] } as never;
+        }),
       getCommandReadModel: () =>
         Effect.sync(() => {
           queried = true;
@@ -283,7 +293,7 @@ it.effect("does not fail startup when the live provider session inventory cannot
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.die("unused"),
-    }),
+    } as unknown as ProviderSessionDirectory.ProviderSessionDirectory["Service"]),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
       readEvents: () => Stream.empty,
       dispatch: () => Effect.die("unused"),
@@ -294,3 +304,149 @@ it.effect("does not fail startup when the live provider session inventory cannot
     Effect.tap(() => Effect.sync(() => assert.equal(queried, false))),
   );
 });
+
+const makeRecoveryShell = (input?: {
+  readonly latestUserMessageAt?: string;
+  readonly sessionStatus?: "running" | "error";
+  readonly lastError?: string | null;
+}) => ({
+  id: ThreadId.make("thread-recovery"),
+  projectId: "project-1",
+  title: "Recovery",
+  modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: "work",
+  worktreePath: "/tmp/work",
+  latestTurn: {
+    turnId: TurnId.make("turn-interrupted"),
+    state: "running",
+    requestedAt: updatedAt,
+    startedAt: updatedAt,
+    completedAt: null,
+    assistantMessageId: null,
+  },
+  createdAt: updatedAt,
+  updatedAt,
+  archivedAt: null,
+  deletedAt: null,
+  latestUserMessageAt: input?.latestUserMessageAt ?? updatedAt,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  recovery: null,
+  session: {
+    threadId: ThreadId.make("thread-recovery"),
+    status: input?.sessionStatus ?? "running",
+    providerName: "codex",
+    providerInstanceId,
+    runtimeMode: "full-access",
+    activeTurnId:
+      (input?.sessionStatus ?? "running") === "running" ? TurnId.make("turn-interrupted") : null,
+    lastError: input?.lastError ?? null,
+    updatedAt,
+  },
+});
+
+function recoveryHarness(input?: { readonly changeDuringGrace?: () => void }) {
+  let shell = makeRecoveryShell();
+  let commandThread = makeThread("thread-recovery", "running", TurnId.make("turn-interrupted"));
+  const order: string[] = [];
+  const accepted = new Map<string, OrchestrationCommand>();
+  const query = {
+    getShellSnapshot: () => Effect.succeed({ threads: [shell] } as never),
+    getCommandReadModel: () => Effect.succeed({ threads: [commandThread] } as never),
+    getThreadShellById: () => Effect.succeed(Option.some(shell) as never),
+  } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+  const dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"] = (
+    command,
+  ) =>
+    Effect.sync(() => {
+      if (command.type === "thread.session.set") {
+        order.push("cleanup");
+        commandThread = { ...commandThread, session: command.session } as never;
+        shell = makeRecoveryShell({
+          sessionStatus: "error",
+          lastError: ServerRuntimeStartup.ORPHANED_PROVIDER_SESSION_ERROR,
+        });
+      } else if (command.type === "thread.turn.start") {
+        order.push("recovery");
+        if (!accepted.has(command.commandId)) accepted.set(command.commandId, command);
+      }
+      return { sequence: accepted.size + 1 };
+    });
+
+  const program = Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerRuntimeStartup.reconcileProviderSessions({
+        graceMs: 30_000,
+        readRecoveryPolicy: () => null,
+      });
+      assert.deepStrictEqual(order, ["cleanup"]);
+
+      // This models a process restart during grace. The second startup sees
+      // the persisted, known orphan error and rearms the same stable command.
+      yield* ServerRuntimeStartup.reconcileProviderSessions({
+        graceMs: 30_000,
+        readRecoveryPolicy: () => null,
+      });
+      yield* Effect.yieldNow;
+      input?.changeDuringGrace?.();
+      if (input?.changeDuringGrace) {
+        shell = makeRecoveryShell({
+          latestUserMessageAt: "2026-08-20T12:00:01.000Z",
+          sessionStatus: "error",
+          lastError: ServerRuntimeStartup.ORPHANED_PROVIDER_SESSION_ERROR,
+        });
+      }
+      yield* TestClock.adjust("29999 millis");
+      assert.equal(accepted.size, 0);
+      yield* TestClock.adjust("1 millis");
+      yield* Effect.yieldNow;
+      return { accepted, order };
+    }),
+  ).pipe(
+    Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, query),
+    Effect.provideService(ProviderService.ProviderService, makeProviderService()),
+    Effect.provideService(ProviderSessionDirectory.ProviderSessionDirectory, {
+      getBinding: () => Effect.succeed(Option.none()),
+      upsert: () => Effect.void,
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.die("unused"),
+    } as unknown as ProviderSessionDirectory.ProviderSessionDirectory["Service"]),
+    Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+      readEvents: () => Stream.empty,
+      dispatch,
+      streamDomainEvents: Stream.empty,
+      latestSequence: Effect.succeed(0),
+    }),
+    Effect.provide(NodeServices.layer),
+  );
+  return program;
+}
+
+it.effect("captures before cleanup, rearms after restart, and accepts one stable recovery", () =>
+  recoveryHarness().pipe(
+    Effect.tap(({ accepted, order }) =>
+      Effect.sync(() => {
+        assert.equal(accepted.size, 1);
+        const command = [...accepted.values()][0];
+        assert.equal(command?.type, "thread.turn.start");
+        if (command?.type === "thread.turn.start") {
+          assert.equal(command.commandId, "thread-recovery:thread-recovery:turn-interrupted");
+          assert.equal(
+            command.message.messageId,
+            "server:thread-recovery:thread-recovery:turn-interrupted",
+          );
+        }
+        assert.equal(order[0], "cleanup");
+      }),
+    ),
+  ),
+);
+
+it.effect("a new user message during grace cancels recovery", () =>
+  recoveryHarness({ changeDuringGrace: () => undefined }).pipe(
+    Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
+  ),
+);

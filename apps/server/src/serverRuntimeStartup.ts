@@ -2,6 +2,7 @@ import {
   CommandId,
   DEFAULT_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  MessageId,
   type ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -13,8 +14,10 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -38,6 +41,17 @@ import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
 import { forkParked } from "./serverActivation.ts";
+import {
+  automaticRecoveryDelayMs,
+  descriptorFromReconciledOrphan,
+  interruptedTurnForAutomaticRecovery,
+  isEligibleAfterOrphanReconciliation,
+  recoveryCommandKey,
+  recoveryMessageId,
+  THREAD_RECOVERY_PROMPT,
+  type ThreadRecoveryDescriptor,
+  type ThreadRecoveryPolicy,
+} from "./orchestration/ThreadRecoverySupervisor.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import {
   formatHeadlessServeOutput,
@@ -293,88 +307,231 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
     Effect.withSpan(`server.startup.${phase}`),
   );
 
-const ORPHANED_PROVIDER_SESSION_ERROR =
+export const ORPHANED_PROVIDER_SESSION_ERROR =
   "Provider session did not survive a server restart. Send a new message to continue.";
 
-export const reconcileProviderSessions = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
-  const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
-  const providerService = yield* ProviderService.ProviderService;
-  const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+const ThreadRecoveryPolicies = Schema.Struct({
+  threads: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Union([
+        Schema.Struct({
+          mode: Schema.Literal("paused"),
+          fallbackAt: Schema.optional(Schema.String),
+          event: Schema.optional(Schema.String),
+        }),
+        Schema.Struct({
+          mode: Schema.Literal("finished"),
+          reason: Schema.optional(Schema.String),
+        }),
+      ]),
+    ),
+  ),
+});
+const decodeThreadRecoveryPolicies = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ThreadRecoveryPolicies),
+);
 
-  const liveThreadIds = new Set(
-    (yield* providerService.listSessions()).map((session) => session.threadId),
-  );
-  const { threads } = yield* query.getCommandReadModel();
-  const orphanedThreads = threads.filter(
-    (thread) =>
-      thread.session !== null &&
-      (thread.session.status === "starting" ||
-        thread.session.status === "running" ||
-        thread.session.activeTurnId !== null) &&
-      !liveThreadIds.has(thread.id),
-  );
+const readThreadRecoveryPolicy = Effect.fn("readThreadRecoveryPolicy")(function* (
+  threadId: string,
+) {
+  const t3Home = process.env.T3CODE_HOME;
+  if (!t3Home) return null;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return yield* fileSystem
+    .readFileString(path.join(t3Home, "userdata/thread-recovery-policies.json"))
+    .pipe(
+      Effect.flatMap(decodeThreadRecoveryPolicies),
+      Effect.map((parsed) => parsed.threads?.[threadId] ?? null),
+      Effect.catch(() => Effect.succeed(null)),
+    );
+});
 
-  for (const thread of orphanedThreads) {
-    const session = thread.session;
-    if (session === null) {
-      continue;
-    }
-    yield* Effect.gen(function* () {
-      const binding = yield* directory.getBinding(thread.id);
-      if (Option.isSome(binding)) {
-        yield* directory.upsert({
-          ...binding.value,
-          status: "stopped",
-          runtimePayload: { activeTurnId: null },
-        });
+interface ProviderSessionReconciliationOptions {
+  readonly graceMs?: number;
+  readonly readRecoveryPolicy?: (threadId: string) => ThreadRecoveryPolicy | null;
+}
+
+const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
+  function* (options: ProviderSessionReconciliationOptions) {
+    const crypto = yield* Crypto.Crypto;
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+    const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+    const providerService = yield* ProviderService.ProviderService;
+    const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+    const readRecoveryPolicy = (threadId: string) =>
+      options.readRecoveryPolicy
+        ? Effect.sync(() => options.readRecoveryPolicy?.(threadId) ?? null)
+        : readThreadRecoveryPolicy(threadId);
+
+    const liveThreadIds = new Set(
+      (yield* providerService.listSessions()).map((session) => session.threadId),
+    );
+    const recoveryThreads = (yield* query.getShellSnapshot()).threads;
+    const { threads } = yield* query.getCommandReadModel();
+    const orphanedThreads = threads.filter(
+      (thread) =>
+        thread.session !== null &&
+        (thread.session.status === "starting" ||
+          thread.session.status === "running" ||
+          thread.session.activeTurnId !== null) &&
+        !liveThreadIds.has(thread.id),
+    );
+    const orphanedThreadIds = new Set(orphanedThreads.map((thread) => thread.id));
+    const recoveryDescriptors: ThreadRecoveryDescriptor[] = [];
+    for (const thread of recoveryThreads) {
+      if (
+        automaticRecoveryDelayMs(yield* readRecoveryPolicy(thread.id), options.graceMs) === null
+      ) {
+        continue;
       }
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterrupts(cause)
-          ? Effect.failCause(cause)
-          : Effect.logWarning("failed to reconcile orphaned provider session directory binding", {
-              threadId: thread.id,
-              cause,
-            }),
-      ),
-    );
+      if (orphanedThreadIds.has(thread.id)) {
+        const interruptedTurnId = interruptedTurnForAutomaticRecovery(thread as never);
+        if (interruptedTurnId !== null) {
+          recoveryDescriptors.push({
+            threadId: thread.id,
+            interruptedTurnId,
+            latestUserMessageAt: thread.latestUserMessageAt,
+          });
+        }
+        continue;
+      }
+      const descriptor = descriptorFromReconciledOrphan(
+        thread.id,
+        thread as never,
+        ORPHANED_PROVIDER_SESSION_ERROR,
+      );
+      if (descriptor !== null) recoveryDescriptors.push(descriptor);
+    }
 
-    yield* Effect.gen(function* () {
-      const reconciledAt = DateTime.formatIso(yield* DateTime.now);
-      yield* orchestrationEngine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make(yield* crypto.randomUUIDv4),
-        threadId: thread.id,
-        session: {
-          ...session,
-          status: "error",
-          activeTurnId: null,
-          lastError: ORPHANED_PROVIDER_SESSION_ERROR,
-          updatedAt: reconciledAt,
-        },
-        createdAt: reconciledAt,
-      });
-    }).pipe(
-      Effect.retry({ times: 1 }),
-      Effect.catchCause((cause) =>
-        Cause.hasInterrupts(cause)
-          ? Effect.failCause(cause)
-          : Effect.logWarning("failed to settle orphaned provider session projection", {
-              threadId: thread.id,
-              cause,
+    for (const thread of orphanedThreads) {
+      const session = thread.session;
+      if (session === null) {
+        continue;
+      }
+      yield* Effect.gen(function* () {
+        const binding = yield* directory.getBinding(thread.id);
+        if (Option.isSome(binding)) {
+          yield* directory.upsert({
+            ...binding.value,
+            status: "stopped",
+            runtimePayload: { activeTurnId: null },
+          });
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to reconcile orphaned provider session directory binding", {
+                threadId: thread.id,
+                cause,
+              }),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(yield* crypto.randomUUIDv4),
+          threadId: thread.id,
+          session: {
+            ...session,
+            status: "error",
+            activeTurnId: null,
+            lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+            updatedAt: reconciledAt,
+          },
+          createdAt: reconciledAt,
+        });
+      }).pipe(
+        Effect.retry({ times: 1 }),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to settle orphaned provider session projection", {
+                threadId: thread.id,
+                cause,
+              }),
+        ),
+      );
+    }
+
+    for (const descriptor of recoveryDescriptors) {
+      const delayMs = automaticRecoveryDelayMs(
+        yield* readRecoveryPolicy(descriptor.threadId),
+        options.graceMs,
+      );
+      if (delayMs === null) continue;
+      yield* Effect.forkScoped(
+        Effect.sleep(Duration.millis(delayMs)).pipe(
+          Effect.andThen(
+            Effect.gen(function* () {
+              if (
+                automaticRecoveryDelayMs(yield* readRecoveryPolicy(descriptor.threadId), 0) === null
+              ) {
+                return;
+              }
+              const thread = yield* query
+                .getThreadShellById(ThreadId.make(descriptor.threadId))
+                .pipe(Effect.map(Option.getOrUndefined));
+              if (
+                thread === undefined ||
+                !isEligibleAfterOrphanReconciliation(
+                  thread as never,
+                  descriptor,
+                  ORPHANED_PROVIDER_SESSION_ERROR,
+                )
+              ) {
+                return;
+              }
+              const createdAt = DateTime.formatIso(yield* DateTime.now);
+              const key = recoveryCommandKey(descriptor.threadId, descriptor.interruptedTurnId);
+              yield* orchestrationEngine.dispatch({
+                type: "thread.turn.start",
+                commandId: CommandId.make(key),
+                threadId: ThreadId.make(descriptor.threadId),
+                message: {
+                  messageId: MessageId.make(
+                    recoveryMessageId(descriptor.threadId, descriptor.interruptedTurnId),
+                  ),
+                  role: "user",
+                  text: THREAD_RECOVERY_PROMPT,
+                  attachments: [],
+                },
+                modelSelection: thread.modelSelection,
+                runtimeMode: thread.runtimeMode,
+                interactionMode: thread.interactionMode,
+                createdAt,
+              });
             }),
-      ),
-    );
-  }
-}).pipe(
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("automatic thread recovery failed", {
+                  threadId: descriptor.threadId,
+                  interruptedTurnId: descriptor.interruptedTurnId,
+                  cause,
+                }),
+          ),
+        ),
+      );
+    }
+    // Prove each scoped supervisor reached its grace boundary before startup
+    // leaves reconciliation. This keeps arming ordered after cleanup.
+    if (recoveryDescriptors.length > 0) yield* Effect.yieldNow;
+  },
   Effect.catchCause((cause) =>
     Cause.hasInterrupts(cause)
       ? Effect.failCause(cause)
       : Effect.logWarning("provider session startup reconciliation failed", { cause }),
   ),
 );
+
+export const reconcileProviderSessions = (options: ProviderSessionReconciliationOptions = {}) =>
+  reconcileProviderSessionsEffect(options);
 
 interface StartupOptions {
   readonly activate?: Effect.Effect<void>;
@@ -440,7 +597,7 @@ export const make = (options?: StartupOptions) =>
         }),
       );
 
-      yield* runStartupPhase("provider-sessions.reconcile", reconcileProviderSessions);
+      yield* runStartupPhase("provider-sessions.reconcile", reconcileProviderSessions());
 
       const welcomeBase = yield* resolveWelcomeBase;
       const environment = yield* serverEnvironment.getDescriptor;

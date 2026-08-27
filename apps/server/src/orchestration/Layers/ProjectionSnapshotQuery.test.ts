@@ -1260,7 +1260,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'thread-1',
             'turn-running',
-            'message-user-2',
+            'server:thread-recovery:thread-1:turn-interrupted',
             NULL,
             NULL,
             NULL,
@@ -1281,6 +1281,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.equal(threadShell.value.latestTurn?.turnId, asTurnId("turn-running"));
         assert.equal(threadShell.value.latestTurn?.state, "running");
         assert.equal(threadShell.value.latestTurn?.startedAt, "2026-04-02T00:00:30.000Z");
+        assert.equal(threadShell.value.latestTurn?.recovery, true);
       }
 
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
@@ -1289,6 +1290,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.equal(threadDetail.value.latestTurn?.turnId, asTurnId("turn-running"));
         assert.equal(threadDetail.value.latestTurn?.state, "running");
         assert.equal(threadDetail.value.latestTurn?.startedAt, "2026-04-02T00:00:30.000Z");
+        assert.equal(threadDetail.value.latestTurn?.recovery, true);
+      }
+
+      yield* sql`
+        UPDATE projection_turns
+        SET pending_message_id = 'message-user-2'
+        WHERE thread_id = 'thread-1' AND turn_id = 'turn-running'
+      `;
+      const ordinaryThread = yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-1"));
+      assert.equal(ordinaryThread._tag, "Some");
+      if (ordinaryThread._tag === "Some") {
+        assert.equal(ordinaryThread.value.latestTurn?.recovery, undefined);
       }
     }),
   );
