@@ -4,6 +4,8 @@ import {
   automaticRecoveryDelayMs,
   descriptorFromGracefulShutdown,
   descriptorFromReconciledOrphan,
+  hasGracefulShutdownRecoveryMarker,
+  hasManualInterruptForTurn,
   interruptedTurnForAutomaticRecovery,
   isEligibleAfterGracefulShutdown,
   isEligibleAfterOrphanReconciliation,
@@ -114,6 +116,48 @@ describe("ThreadRecoverySupervisor", () => {
       gracefulShutdownStoppedAt: stoppedAt,
     });
     expect(isEligibleAfterGracefulShutdown(stoppedThread as never, graceful!)).toBe(true);
+  });
+
+  it("arms from the exact running marker and accepts its shutdown error state", () => {
+    const stoppedAt = "2026-08-17T19:00:10.000Z";
+    const payload = { gracefulShutdownRecovery: { turnId: "turn-1", stoppedAt } };
+    const graceful = descriptorFromGracefulShutdown(
+      "thread-1",
+      runningThread as never,
+      payload,
+      "2026-08-17T19:01:00.000Z",
+    );
+    expect(graceful).not.toBeNull();
+    expect(
+      isEligibleAfterGracefulShutdown(
+        {
+          ...runningThread,
+          latestTurn: { ...runningThread.latestTurn, state: "error" },
+          session: { status: "error", activeTurnId: null, lastError: "shutdown" },
+        } as never,
+        graceful!,
+      ),
+    ).toBe(true);
+  });
+
+  it("detects marker presence but suppresses a matching manual interruption", () => {
+    const payload = {
+      gracefulShutdownRecovery: {
+        turnId: "turn-1",
+        stoppedAt: "2026-08-17T19:00:10.000Z",
+      },
+      manualInterruptTurnId: "turn-1",
+    };
+    expect(hasGracefulShutdownRecoveryMarker(payload)).toBe(true);
+    expect(hasManualInterruptForTurn(payload, "turn-1")).toBe(true);
+    expect(
+      descriptorFromGracefulShutdown(
+        "thread-1",
+        runningThread as never,
+        payload,
+        "2026-08-17T19:01:00.000Z",
+      ),
+    ).toBeNull();
   });
 
   it.each([
