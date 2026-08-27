@@ -332,20 +332,36 @@ const decodeThreadRecoveryPolicies = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ThreadRecoveryPolicies),
 );
 
-const readThreadRecoveryPolicy = Effect.fn("readThreadRecoveryPolicy")(function* (
+export class ThreadRecoveryPolicyReadError extends Schema.TaggedErrorClass<ThreadRecoveryPolicyReadError>()(
+  "ThreadRecoveryPolicyReadError",
+  {
+    errorClass: Schema.Union([Schema.Literal("unreadable"), Schema.Literal("malformed")]),
+  },
+) {}
+
+export const readThreadRecoveryPolicy = Effect.fn("readThreadRecoveryPolicy")(function* (
   threadId: string,
+  configuredHome?: string,
 ) {
-  const t3Home = process.env.T3CODE_HOME;
+  const t3Home = configuredHome ?? process.env.T3CODE_HOME;
   if (!t3Home) return null;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  return yield* fileSystem
-    .readFileString(path.join(t3Home, "userdata/thread-recovery-policies.json"))
+  const policyPath = path.join(t3Home, "userdata/thread-recovery-policies.json");
+  const encoded = yield* fileSystem
+    .readFileString(policyPath)
     .pipe(
-      Effect.flatMap(decodeThreadRecoveryPolicies),
-      Effect.map((parsed) => parsed.threads?.[threadId] ?? null),
-      Effect.catch(() => Effect.succeed(null)),
+      Effect.catchTag("PlatformError", (error) =>
+        error.reason._tag === "NotFound"
+          ? Effect.succeed(null)
+          : Effect.fail(new ThreadRecoveryPolicyReadError({ errorClass: "unreadable" })),
+      ),
     );
+  if (encoded === null) return null;
+  return yield* decodeThreadRecoveryPolicies(encoded).pipe(
+    Effect.map((parsed) => parsed.threads?.[threadId] ?? null),
+    Effect.mapError(() => new ThreadRecoveryPolicyReadError({ errorClass: "malformed" })),
+  );
 });
 
 interface ProviderSessionReconciliationOptions {
@@ -365,6 +381,17 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
         ? Effect.sync(() => options.readRecoveryPolicy?.(threadId) ?? null)
         : readThreadRecoveryPolicy(threadId);
 
+    const readTrustedRecoveryPolicy = (threadId: string) =>
+      readRecoveryPolicy(threadId).pipe(
+        Effect.map(Option.some),
+        Effect.catchTag("ThreadRecoveryPolicyReadError", (error) =>
+          Effect.logError("automatic thread recovery policy unavailable", {
+            threadId,
+            errorClass: error.errorClass,
+          }).pipe(Effect.as(Option.none())),
+        ),
+      );
+
     const liveThreadIds = new Set(
       (yield* providerService.listSessions()).map((session) => session.threadId),
     );
@@ -381,9 +408,9 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
     const orphanedThreadIds = new Set(orphanedThreads.map((thread) => thread.id));
     const recoveryDescriptors: ThreadRecoveryDescriptor[] = [];
     for (const thread of recoveryThreads) {
-      if (
-        automaticRecoveryDelayMs(yield* readRecoveryPolicy(thread.id), options.graceMs) === null
-      ) {
+      const policy = yield* readTrustedRecoveryPolicy(thread.id);
+      if (Option.isNone(policy)) continue;
+      if (automaticRecoveryDelayMs(policy.value, options.graceMs) === null) {
         continue;
       }
       if (orphanedThreadIds.has(thread.id)) {
@@ -459,20 +486,21 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
     }
 
     for (const descriptor of recoveryDescriptors) {
-      const delayMs = automaticRecoveryDelayMs(
-        yield* readRecoveryPolicy(descriptor.threadId),
-        options.graceMs,
-      );
+      const initialPolicy = yield* readTrustedRecoveryPolicy(descriptor.threadId);
+      if (Option.isNone(initialPolicy)) continue;
+      const delayMs = automaticRecoveryDelayMs(initialPolicy.value, options.graceMs);
       if (delayMs === null) continue;
       yield* Effect.forkScoped(
         Effect.sleep(Duration.millis(delayMs)).pipe(
           Effect.andThen(
             Effect.gen(function* () {
-              if (
-                automaticRecoveryDelayMs(yield* readRecoveryPolicy(descriptor.threadId), 0) === null
-              ) {
-                return;
-              }
+              const currentPolicy = yield* readTrustedRecoveryPolicy(descriptor.threadId);
+              if (Option.isNone(currentPolicy)) return;
+              if (automaticRecoveryDelayMs(currentPolicy.value, 0) === null) return;
+              const providerBecameLive = (yield* providerService.listSessions()).some(
+                (session) => session.threadId === descriptor.threadId,
+              );
+              if (providerBecameLive) return;
               const thread = yield* query
                 .getThreadShellById(ThreadId.make(descriptor.threadId))
                 .pipe(Effect.map(Option.getOrUndefined));

@@ -16,6 +16,68 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 
+it.effect("uses the default recovery policy only when the policy file is missing", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-recovery-policy-"))),
+    (t3Home) =>
+      ServerRuntimeStartup.readThreadRecoveryPolicy("thread-1", t3Home).pipe(
+        Effect.tap((policy) => Effect.sync(() => assert.equal(policy, null))),
+        Effect.provide(NodeServices.layer),
+      ),
+    (t3Home) => Effect.sync(() => NodeFS.rmSync(t3Home, { recursive: true, force: true })),
+  ),
+);
+
+it.effect("fails closed with a safe class for a malformed recovery policy", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const t3Home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-recovery-policy-"));
+      NodeFS.mkdirSync(NodePath.join(t3Home, "userdata"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(t3Home, "userdata/thread-recovery-policies.json"),
+        '{"threads":{"thread-1":{"mode":"unknown"}}}',
+      );
+      return t3Home;
+    }),
+    (t3Home) =>
+      ServerRuntimeStartup.readThreadRecoveryPolicy("thread-1", t3Home).pipe(
+        Effect.flip,
+        Effect.tap((error) =>
+          Effect.sync(() => {
+            assert.equal(error._tag, "ThreadRecoveryPolicyReadError");
+            assert.equal(error.errorClass, "malformed");
+          }),
+        ),
+        Effect.provide(NodeServices.layer),
+      ),
+    (t3Home) => Effect.sync(() => NodeFS.rmSync(t3Home, { recursive: true, force: true })),
+  ),
+);
+
+it.effect("fails closed with a safe class for an unreadable recovery policy", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const t3Home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-recovery-policy-"));
+      NodeFS.mkdirSync(NodePath.join(t3Home, "userdata/thread-recovery-policies.json"), {
+        recursive: true,
+      });
+      return t3Home;
+    }),
+    (t3Home) =>
+      ServerRuntimeStartup.readThreadRecoveryPolicy("thread-1", t3Home).pipe(
+        Effect.flip,
+        Effect.tap((error) =>
+          Effect.sync(() => {
+            assert.equal(error._tag, "ThreadRecoveryPolicyReadError");
+            assert.equal(error.errorClass, "unreadable");
+          }),
+        ),
+        Effect.provide(NodeServices.layer),
+      ),
+    (t3Home) => Effect.sync(() => NodeFS.rmSync(t3Home, { recursive: true, force: true })),
+  ),
+);
+
 it("uses the canonical Codex default for auto-bootstrapped model selection", () => {
   assert.deepStrictEqual(ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection(), {
     instanceId: ProviderInstanceId.make("codex"),
@@ -279,3 +341,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
     assert.deepStrictEqual(yield* Ref.get(dispatchCalls), []);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";

@@ -27,9 +27,11 @@ import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -68,6 +70,9 @@ import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import * as ProviderSessionDirectory from "../../provider/Services/ProviderSessionDirectory.ts";
+import * as ServerRuntimeStartup from "../../serverRuntimeStartup.ts";
+import { descriptorFromReconciledOrphan } from "../ThreadRecoverySupervisor.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -649,6 +654,7 @@ describe("ProviderCommandReactor", () => {
     return {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
       startSession,
       sendTurn,
       interruptTurn,
@@ -662,6 +668,8 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       runtimeSessions,
+      providerService: service,
+      snapshotQuery,
       stateDir,
       drain,
       restartReactor,
@@ -714,6 +722,171 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  effectIt.effect(
+    "recovers an orphan once across closed startup scopes and the real provider reactor",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const threadId = ThreadId.make("thread-1");
+        const now = "2026-01-01T00:00:00.000Z";
+
+        yield* Effect.promise(() =>
+          harness.runEffect(
+            harness.engine.dispatch({
+              type: "thread.turn.start",
+              commandId: CommandId.make("cmd-interrupted-turn"),
+              threadId,
+              message: {
+                messageId: asMessageId("message-interrupted-turn"),
+                role: "user",
+                text: "Continue this objective after restart.",
+                attachments: [],
+              },
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              runtimeMode: "approval-required",
+              createdAt: now,
+            }),
+          ),
+        );
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+        const interruptedTurnId = asTurnId("turn-1");
+
+        yield* Effect.promise(() =>
+          harness.runEffect(
+            harness.engine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make("cmd-mark-interrupted-running"),
+              threadId,
+              session: {
+                threadId,
+                status: "running",
+                providerName: "codex",
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                runtimeMode: "approval-required",
+                activeTurnId: interruptedTurnId,
+                lastError: null,
+                updatedAt: now,
+              },
+              createdAt: now,
+            }),
+          ),
+        );
+        harness.runtimeSessions.splice(0);
+
+        const withInterruptedTurn = <T extends { readonly threads: ReadonlyArray<unknown> }>(
+          snapshot: T,
+        ) => ({
+          ...snapshot,
+          threads: snapshot.threads.map((candidate) => {
+            const thread = candidate as { readonly id?: ThreadId };
+            return thread.id === threadId
+              ? {
+                  ...thread,
+                  latestTurn: {
+                    turnId: interruptedTurnId,
+                    state: "running" as const,
+                    requestedAt: now,
+                    startedAt: now,
+                    completedAt: null,
+                    assistantMessageId: null,
+                  },
+                }
+              : candidate;
+          }),
+        });
+        const recoveryQuery = {
+          ...harness.snapshotQuery,
+          getShellSnapshot: () =>
+            harness.snapshotQuery.getShellSnapshot().pipe(Effect.map(withInterruptedTurn)),
+          getThreadShellById: (candidateId: ThreadId) =>
+            harness.snapshotQuery.getThreadShellById(candidateId).pipe(
+              Effect.map(
+                Option.map((thread) =>
+                  candidateId === threadId
+                    ? ({
+                        ...thread,
+                        latestTurn: {
+                          turnId: interruptedTurnId,
+                          state: "running" as const,
+                          requestedAt: now,
+                          startedAt: now,
+                          completedAt: null,
+                          assistantMessageId: null,
+                        },
+                      } as never)
+                    : thread,
+                ),
+              ),
+            ),
+        } as ProjectionSnapshotQuery["Service"];
+
+        const directory = {
+          getBinding: () => Effect.succeed(Option.none()),
+          upsert: () => Effect.void,
+          getProvider: () => Effect.die("unused"),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        } as unknown as ProviderSessionDirectory.ProviderSessionDirectory["Service"];
+        const startup = (graceMs: number) =>
+          ServerRuntimeStartup.reconcileProviderSessions({
+            graceMs,
+            readRecoveryPolicy: () => null,
+          }).pipe(
+            Effect.provideService(ProjectionSnapshotQuery, recoveryQuery),
+            Effect.provideService(ProviderService, harness.providerService),
+            Effect.provideService(ProviderSessionDirectory.ProviderSessionDirectory, directory),
+            Effect.provideService(OrchestrationEngineService, harness.engine),
+            Effect.provide(NodeServices.layer),
+          );
+
+        const firstStartupScope = yield* Scope.make();
+        yield* startup(30_000).pipe(Scope.provide(firstStartupScope));
+        yield* Scope.close(firstStartupScope, Exit.void);
+        const afterFirstStartup = yield* recoveryQuery.getThreadShellById(threadId);
+        const persistedOrphan = Option.getOrUndefined(afterFirstStartup);
+        expect(persistedOrphan?.session?.status).toBe("error");
+        expect(persistedOrphan?.session?.lastError).toBe(
+          ServerRuntimeStartup.ORPHANED_PROVIDER_SESSION_ERROR,
+        );
+        expect(persistedOrphan?.session?.activeTurnId).toBeNull();
+        expect(persistedOrphan?.latestTurn?.turnId).toBe(interruptedTurnId);
+        expect(persistedOrphan?.latestTurn?.state).toBe("running");
+        expect(persistedOrphan?.latestUserMessageAt).toBe(now);
+        expect(harness.runtimeSessions).toHaveLength(0);
+        expect(
+          descriptorFromReconciledOrphan(
+            threadId,
+            persistedOrphan as never,
+            ServerRuntimeStartup.ORPHANED_PROVIDER_SESSION_ERROR,
+          ),
+        ).not.toBeNull();
+
+        const secondStartupScope = yield* Scope.make();
+        yield* startup(0).pipe(Scope.provide(secondStartupScope));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("0 millis");
+        yield* Effect.yieldNow;
+        const afterRecoveryDispatch = yield* Effect.promise(() => harness.readModel());
+        const dispatchedRecoveryMessages = afterRecoveryDispatch.threads
+          .find((candidate) => candidate.id === threadId)
+          ?.messages.filter((message) => message.id.startsWith("server:thread-recovery:"));
+        expect(dispatchedRecoveryMessages).toHaveLength(1);
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
+        yield* Effect.promise(() => harness.drain());
+
+        const snapshot = yield* Effect.promise(() => harness.readModel());
+        const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
+        const recoveryMessages = thread?.messages.filter((message) =>
+          message.id.startsWith("server:thread-recovery:"),
+        );
+        expect(recoveryMessages).toHaveLength(1);
+        const recoveryShell = yield* recoveryQuery.getThreadShellById(threadId);
+        expect(Option.getOrUndefined(recoveryShell)?.latestTurn?.state).toBe("running");
+        expect(harness.sendTurn.mock.calls.length).toBe(2);
+        yield* Scope.close(secondStartupScope, Exit.void);
+      }),
+  );
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {
