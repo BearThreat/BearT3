@@ -45,6 +45,8 @@ import {
   automaticRecoveryDelayMs,
   descriptorFromGracefulShutdown,
   descriptorFromReconciledOrphan,
+  hasGracefulShutdownRecoveryMarker,
+  hasManualInterruptForTurn,
   interruptedTurnForAutomaticRecovery,
   isEligibleAfterRecoveryGrace,
   matchesGracefulShutdownRecoveryMarker,
@@ -417,6 +419,37 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
       if (automaticRecoveryDelayMs(policy.value, options.graceMs) === null) {
         continue;
       }
+      const binding = yield* directory.getBinding(ThreadId.make(thread.id)).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to inspect graceful shutdown recovery marker", {
+                threadId: thread.id,
+                cause,
+              }).pipe(Effect.as(Option.none())),
+        ),
+      );
+      if (Option.isSome(binding)) {
+        const latestTurnId = thread.latestTurn?.turnId;
+        const gracefulDescriptor = descriptorFromGracefulShutdown(
+          thread.id,
+          thread as never,
+          binding.value.runtimePayload,
+          observedAt,
+          options.gracefulShutdownMaxAgeMs,
+        );
+        if (gracefulDescriptor !== null) {
+          recoveryDescriptors.push(gracefulDescriptor);
+          continue;
+        }
+        if (
+          hasGracefulShutdownRecoveryMarker(binding.value.runtimePayload) ||
+          (latestTurnId !== undefined &&
+            hasManualInterruptForTurn(binding.value.runtimePayload, latestTurnId))
+        ) {
+          continue;
+        }
+      }
       if (orphanedThreadIds.has(thread.id)) {
         const interruptedTurnId = interruptedTurnForAutomaticRecovery(thread as never);
         if (interruptedTurnId !== null) {
@@ -435,27 +468,7 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
       );
       if (descriptor !== null) {
         recoveryDescriptors.push(descriptor);
-        continue;
       }
-      const binding = yield* directory.getBinding(ThreadId.make(thread.id)).pipe(
-        Effect.catchCause((cause) =>
-          Cause.hasInterrupts(cause)
-            ? Effect.failCause(cause)
-            : Effect.logWarning("failed to inspect graceful shutdown recovery marker", {
-                threadId: thread.id,
-                cause,
-              }).pipe(Effect.as(Option.none())),
-        ),
-      );
-      if (Option.isNone(binding)) continue;
-      const gracefulDescriptor = descriptorFromGracefulShutdown(
-        thread.id,
-        thread as never,
-        binding.value.runtimePayload,
-        observedAt,
-        options.gracefulShutdownMaxAgeMs,
-      );
-      if (gracefulDescriptor !== null) recoveryDescriptors.push(gracefulDescriptor);
     }
 
     for (const thread of orphanedThreads) {
@@ -532,11 +545,14 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
                 const currentBinding = yield* directory
                   .getBinding(ThreadId.make(descriptor.threadId))
                   .pipe(Effect.catchCause(() => Effect.succeed(Option.none())));
+                const markerObservedAt = DateTime.formatIso(yield* DateTime.now);
                 if (
                   Option.isNone(currentBinding) ||
                   !matchesGracefulShutdownRecoveryMarker(
                     currentBinding.value.runtimePayload,
                     descriptor,
+                    markerObservedAt,
+                    options.gracefulShutdownMaxAgeMs,
                   )
                 ) {
                   return;

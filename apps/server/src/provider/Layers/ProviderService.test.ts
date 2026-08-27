@@ -372,6 +372,62 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   }),
 );
 
+it.effect("ProviderService shutdown persists a binding marker when adapter inventory fails", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    codex.listSessions.mockImplementation(() => Effect.die("simulated listSessions failure"));
+    const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const persistenceScope = yield* Scope.make();
+    const persistenceServices = yield* Layer.build(
+      Layer.mergeAll(directoryLayer, runtimeRepositoryLayer),
+    ).pipe(Scope.provide(persistenceScope));
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory.pipe(
+      Effect.provide(persistenceServices),
+    );
+    const threadId = asThreadId("thread-clean-restart-list-failure");
+    const turnId = asTurnId("turn-clean-restart-list-failure");
+    yield* directory.upsert({
+      threadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      status: "running",
+      runtimePayload: { activeTurnId: turnId },
+    });
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+      Layer.provide(Layer.succeed(ProviderSessionDirectory.ProviderSessionDirectory, directory)),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(serverConfigTestLayer),
+      Layer.provideMerge(AnalyticsService.layerTest),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+    );
+    const providerScope = yield* Scope.make();
+    const providerServices = yield* Layer.build(providerLayer).pipe(Scope.provide(providerScope));
+    yield* ProviderService.ProviderService.pipe(Effect.provide(providerServices));
+
+    const closeExit = yield* Scope.close(providerScope, Exit.void).pipe(Effect.exit);
+    assert.equal(Exit.isSuccess(closeExit), true);
+    const binding = yield* directory.getBinding(threadId);
+    assert.isTrue(Option.isSome(binding));
+    if (Option.isSome(binding)) {
+      const payload = binding.value.runtimePayload as {
+        readonly gracefulShutdownRecovery?: { readonly turnId?: unknown } | null;
+      };
+      assert.equal(payload.gracefulShutdownRecovery?.turnId, turnId);
+    }
+    yield* Scope.close(persistenceScope, Exit.void);
+  }),
+);
+
 it.effect("ProviderService shutdown persists only the exact active-turn recovery marker", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();
@@ -408,6 +464,10 @@ it.effect("ProviderService shutdown persists only the exact active-turn recovery
     const interruptedTurnId = asTurnId("turn-clean-restart-active");
     const manualThreadId = asThreadId("thread-clean-restart-manual-race");
     const manualTurnId = asTurnId("turn-clean-restart-manual-race");
+    const bindingOnlyThreadId = asThreadId("thread-clean-restart-binding-only");
+    const bindingOnlyTurnId = asTurnId("turn-clean-restart-binding-only");
+    const bindingOnlyManualThreadId = asThreadId("thread-clean-restart-binding-only-manual");
+    const bindingOnlyManualTurnId = asTurnId("turn-clean-restart-binding-only-manual");
     const staleThreadId = asThreadId("thread-clean-restart-stale");
 
     yield* provider.startSession(activeThreadId, {
@@ -440,6 +500,23 @@ it.effect("ProviderService shutdown persists only the exact active-turn recovery
       runtimePayload: { activeTurnId: manualTurnId },
     });
     yield* provider.interruptTurn({ threadId: manualThreadId });
+    yield* directory.upsert({
+      threadId: bindingOnlyThreadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      status: "running",
+      runtimePayload: { activeTurnId: bindingOnlyTurnId },
+    });
+    yield* directory.upsert({
+      threadId: bindingOnlyManualThreadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      status: "running",
+      runtimePayload: {
+        activeTurnId: bindingOnlyManualTurnId,
+        manualInterruptTurnId: bindingOnlyManualTurnId,
+      },
+    });
     yield* directory.upsert({
       threadId: staleThreadId,
       provider: CODEX_DRIVER,
@@ -476,6 +553,30 @@ it.effect("ProviderService shutdown persists only the exact active-turn recovery
       const payload = staleBinding.value.runtimePayload as {
         readonly gracefulShutdownRecovery?: unknown;
       };
+      assert.equal(payload.gracefulShutdownRecovery, null);
+    }
+    const bindingOnly = yield* directory.getBinding(bindingOnlyThreadId);
+    assert.isTrue(Option.isSome(bindingOnly));
+    if (Option.isSome(bindingOnly)) {
+      const payload = bindingOnly.value.runtimePayload as {
+        readonly activeTurnId?: unknown;
+        readonly gracefulShutdownRecovery?: {
+          readonly turnId?: unknown;
+          readonly stoppedAt?: unknown;
+        } | null;
+      };
+      assert.equal(payload.activeTurnId, null);
+      assert.equal(payload.gracefulShutdownRecovery?.turnId, bindingOnlyTurnId);
+      assert.equal(typeof payload.gracefulShutdownRecovery?.stoppedAt, "string");
+    }
+    const bindingOnlyManual = yield* directory.getBinding(bindingOnlyManualThreadId);
+    assert.isTrue(Option.isSome(bindingOnlyManual));
+    if (Option.isSome(bindingOnlyManual)) {
+      const payload = bindingOnlyManual.value.runtimePayload as {
+        readonly gracefulShutdownRecovery?: unknown;
+        readonly manualInterruptTurnId?: unknown;
+      };
+      assert.equal(payload.manualInterruptTurnId, bindingOnlyManualTurnId);
       assert.equal(payload.gracefulShutdownRecovery, null);
     }
     const manualBinding = yield* directory.getBinding(manualThreadId);

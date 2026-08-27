@@ -315,7 +315,7 @@ const makeRecoveryShell = (input?: {
   readonly archivedAt?: string | null;
   readonly hasPendingApprovals?: boolean;
   readonly hasPendingUserInput?: boolean;
-  readonly latestTurnState?: "running" | "interrupted" | "completed";
+  readonly latestTurnState?: "running" | "interrupted" | "completed" | "error";
 }) => ({
   id: ThreadId.make("thread-recovery"),
   projectId: "project-1",
@@ -331,7 +331,9 @@ const makeRecoveryShell = (input?: {
     requestedAt: updatedAt,
     startedAt: updatedAt,
     completedAt:
-      input?.latestTurnState === "completed" || input?.latestTurnState === "interrupted"
+      input?.latestTurnState === "completed" ||
+      input?.latestTurnState === "interrupted" ||
+      input?.latestTurnState === "error"
         ? updatedAt
         : null,
     assistantMessageId: null,
@@ -515,28 +517,52 @@ it.effect.each([
   ),
 );
 
-type GracefulRecoveryChange = RecoveryGraceChange | "marker-cleared" | "marker-turn-changed";
+type GracefulRecoveryChange =
+  | RecoveryGraceChange
+  | "marker-cleared"
+  | "marker-turn-changed"
+  | "manual-interrupt"
+  | "shutdown-error";
 
 function gracefulRecoveryHarness(input?: {
   readonly changeDuringGrace?: GracefulRecoveryChange;
   readonly markerStoppedAt?: string;
   readonly closeBeforeGrace?: boolean;
+  readonly initialLifecycle?: "running" | "stopped" | "error";
+  readonly initialMarker?: "exact" | "missing" | "wrong" | "manual";
+  readonly gracefulShutdownMaxAgeMs?: number;
 }) {
   const markerStoppedAt = input?.markerStoppedAt ?? updatedAt;
-  let shell = makeRecoveryShell({ sessionStatus: "stopped", latestTurnState: "interrupted" });
+  const initialLifecycle = input?.initialLifecycle ?? "stopped";
+  let shell =
+    initialLifecycle === "running"
+      ? makeRecoveryShell()
+      : initialLifecycle === "error"
+        ? makeRecoveryShell({ sessionStatus: "error", latestTurnState: "error" })
+        : makeRecoveryShell({ sessionStatus: "stopped", latestTurnState: "interrupted" });
+  let commandThread = makeThread(
+    "thread-recovery",
+    initialLifecycle,
+    initialLifecycle === "running" ? TurnId.make("turn-interrupted") : null,
+  );
   let policy: ThreadRecoveryPolicy | null = null;
   let providerLive = false;
-  let marker: unknown = {
-    gracefulShutdownRecovery: {
-      turnId: "turn-interrupted",
-      stoppedAt: markerStoppedAt,
-    },
-  };
+  let marker: unknown =
+    input?.initialMarker === "missing"
+      ? { gracefulShutdownRecovery: null }
+      : {
+          gracefulShutdownRecovery: {
+            turnId: input?.initialMarker === "wrong" ? "turn-other" : "turn-interrupted",
+            stoppedAt: markerStoppedAt,
+          },
+          ...(input?.initialMarker === "manual"
+            ? { manualInterruptTurnId: "turn-interrupted" }
+            : {}),
+        };
   const accepted = new Map<string, OrchestrationCommand>();
   const query = {
     getShellSnapshot: () => Effect.succeed({ threads: [shell] } as never),
-    getCommandReadModel: () =>
-      Effect.succeed({ threads: [makeThread("thread-recovery", "stopped")] } as never),
+    getCommandReadModel: () => Effect.succeed({ threads: [commandThread] } as never),
     getThreadShellById: () => Effect.succeed(Option.some(shell) as never),
   } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
   const program = Effect.gen(function* () {
@@ -544,7 +570,7 @@ function gracefulRecoveryHarness(input?: {
     const startupScope = yield* Scope.make();
     yield* ServerRuntimeStartup.reconcileProviderSessions({
       graceMs: 30_000,
-      gracefulShutdownMaxAgeMs: 5 * 60_000,
+      gracefulShutdownMaxAgeMs: input?.gracefulShutdownMaxAgeMs ?? 5 * 60_000,
       readRecoveryPolicy: () => policy,
     }).pipe(Scope.provide(startupScope));
     if (input?.closeBeforeGrace) {
@@ -592,6 +618,18 @@ function gracefulRecoveryHarness(input?: {
           gracefulShutdownRecovery: { turnId: "turn-other", stoppedAt: markerStoppedAt },
         };
         break;
+      case "manual-interrupt":
+        marker = {
+          gracefulShutdownRecovery: {
+            turnId: "turn-interrupted",
+            stoppedAt: markerStoppedAt,
+          },
+          manualInterruptTurnId: "turn-interrupted",
+        };
+        break;
+      case "shutdown-error":
+        shell = makeRecoveryShell({ sessionStatus: "error", latestTurnState: "error" });
+        break;
     }
     yield* TestClock.adjust("29999 millis");
     assert.equal(accepted.size, 0);
@@ -636,6 +674,9 @@ function gracefulRecoveryHarness(input?: {
       readEvents: () => Stream.empty,
       dispatch: (command) =>
         Effect.sync(() => {
+          if (command.type === "thread.session.set") {
+            commandThread = { ...commandThread, session: command.session } as never;
+          }
           if (command.type === "thread.turn.start" && !accepted.has(command.commandId)) {
             accepted.set(command.commandId, command);
           }
@@ -665,6 +706,41 @@ it.effect("recovers one exact turn from a recent graceful restart", () =>
   ),
 );
 
+it.effect("recovers the exact marked turn after shutdown settles running state to error", () =>
+  gracefulRecoveryHarness({
+    initialLifecycle: "running",
+    changeDuringGrace: "shutdown-error",
+  }).pipe(
+    Effect.tap(({ accepted, marker }) =>
+      Effect.sync(() => {
+        assert.equal(accepted.size, 1);
+        const command = [...accepted.values()][0];
+        assert.equal(command?.type, "thread.turn.start");
+        if (command?.type === "thread.turn.start") {
+          assert.equal(command.commandId, "thread-recovery:thread-recovery:turn-interrupted");
+        }
+        assert.deepStrictEqual(marker, { gracefulShutdownRecovery: null });
+      }),
+    ),
+  ),
+);
+
+it.effect.each(["missing", "wrong", "manual"] as const)(
+  "does not recover an error without an exact non-manual marker: %s",
+  (initialMarker) =>
+    gracefulRecoveryHarness({ initialLifecycle: "error", initialMarker }).pipe(
+      Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
+    ),
+);
+
+it.effect("a manual marker suppresses the orphan fallback while shutdown settles", () =>
+  gracefulRecoveryHarness({
+    initialLifecycle: "running",
+    initialMarker: "manual",
+    changeDuringGrace: "shutdown-error",
+  }).pipe(Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0)))),
+);
+
 it.effect.each([
   "approval",
   "input",
@@ -676,6 +752,7 @@ it.effect.each([
   "live-provider",
   "marker-cleared",
   "marker-turn-changed",
+  "manual-interrupt",
 ] as const)("%s during graceful restart grace suppresses recovery", (changeDuringGrace) =>
   gracefulRecoveryHarness({ changeDuringGrace }).pipe(
     Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
@@ -684,6 +761,12 @@ it.effect.each([
 
 it.effect("does not recover a stale graceful shutdown marker", () =>
   gracefulRecoveryHarness({ markerStoppedAt: "2026-08-20T11:00:00.000Z" }).pipe(
+    Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
+  ),
+);
+
+it.effect("rechecks graceful shutdown marker age after the recovery grace", () =>
+  gracefulRecoveryHarness({ gracefulShutdownMaxAgeMs: 20_000 }).pipe(
     Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
   ),
 );

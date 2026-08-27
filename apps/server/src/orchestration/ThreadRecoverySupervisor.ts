@@ -54,9 +54,72 @@ function gracefulShutdownRecoveryMarker(
     readonly turnId?: unknown;
     readonly stoppedAt?: unknown;
   };
-  return typeof turnId === "string" && turnId.length > 0 && typeof stoppedAt === "string"
-    ? { turnId, stoppedAt }
-    : null;
+  if (typeof turnId !== "string" || turnId.length === 0 || typeof stoppedAt !== "string") {
+    return null;
+  }
+  const manualInterruptTurnId = (runtimePayload as { readonly manualInterruptTurnId?: unknown })
+    .manualInterruptTurnId;
+  return manualInterruptTurnId === turnId ? null : { turnId, stoppedAt };
+}
+
+export function hasGracefulShutdownRecoveryMarker(runtimePayload: unknown): boolean {
+  return (
+    runtimePayload !== null &&
+    typeof runtimePayload === "object" &&
+    !Array.isArray(runtimePayload) &&
+    "gracefulShutdownRecovery" in runtimePayload &&
+    runtimePayload.gracefulShutdownRecovery !== null &&
+    runtimePayload.gracefulShutdownRecovery !== undefined
+  );
+}
+
+export function hasManualInterruptForTurn(runtimePayload: unknown, turnId: string): boolean {
+  return (
+    runtimePayload !== null &&
+    typeof runtimePayload === "object" &&
+    !Array.isArray(runtimePayload) &&
+    (runtimePayload as { readonly manualInterruptTurnId?: unknown }).manualInterruptTurnId ===
+      turnId
+  );
+}
+
+function isFreshGracefulShutdownRecoveryMarker(
+  marker: GracefulShutdownRecoveryMarker,
+  observedAt: string,
+  maxAgeMs: number,
+): boolean {
+  const stoppedAtMs = Date.parse(marker.stoppedAt);
+  const observedAtMs = Date.parse(observedAt);
+  const ageMs = observedAtMs - stoppedAtMs;
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= Math.max(0, maxAgeMs);
+}
+
+function hasGracefulShutdownLifecycle(
+  thread: RecoveryThread,
+  turnId: string,
+  phase: "startup" | "after-grace",
+): boolean {
+  if (thread.latestTurn?.turnId !== turnId) return false;
+  if (
+    thread.latestTurn.state === "interrupted" &&
+    thread.session?.status === "stopped" &&
+    thread.session.activeTurnId === null
+  ) {
+    return true;
+  }
+  if (
+    thread.latestTurn.state === "error" &&
+    thread.session?.status === "error" &&
+    thread.session.activeTurnId === null
+  ) {
+    return true;
+  }
+  return (
+    phase === "startup" &&
+    thread.latestTurn.state === "running" &&
+    thread.session?.status === "running" &&
+    thread.session.activeTurnId === turnId
+  );
 }
 
 export function automaticRecoveryDelayMs(
@@ -120,19 +183,13 @@ export function descriptorFromGracefulShutdown(
 ): ThreadRecoveryDescriptor | null {
   const marker = gracefulShutdownRecoveryMarker(runtimePayload);
   if (marker === null) return null;
-  const stoppedAtMs = Date.parse(marker.stoppedAt);
-  const observedAtMs = Date.parse(observedAt);
-  const ageMs = observedAtMs - stoppedAtMs;
-  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > Math.max(0, maxAgeMs)) return null;
+  if (!isFreshGracefulShutdownRecoveryMarker(marker, observedAt, maxAgeMs)) return null;
   if (
     thread.archivedAt !== null ||
     thread.hasPendingApprovals ||
     thread.hasPendingUserInput ||
     thread.recovery != null ||
-    thread.latestTurn?.turnId !== marker.turnId ||
-    thread.latestTurn.state !== "interrupted" ||
-    thread.session?.status !== "stopped" ||
-    thread.session.activeTurnId !== null
+    !hasGracefulShutdownLifecycle(thread, marker.turnId, "startup")
   ) {
     return null;
   }
@@ -148,13 +205,17 @@ export function descriptorFromGracefulShutdown(
 export function matchesGracefulShutdownRecoveryMarker(
   runtimePayload: unknown,
   descriptor: ThreadRecoveryDescriptor,
+  observedAt?: string,
+  maxAgeMs = DEFAULT_GRACEFUL_SHUTDOWN_RECOVERY_MAX_AGE_MS,
 ): boolean {
   if (descriptor.source !== "graceful-shutdown") return true;
   const marker = gracefulShutdownRecoveryMarker(runtimePayload);
   return (
     marker !== null &&
     marker.turnId === descriptor.interruptedTurnId &&
-    marker.stoppedAt === descriptor.gracefulShutdownStoppedAt
+    marker.stoppedAt === descriptor.gracefulShutdownStoppedAt &&
+    (observedAt === undefined ||
+      isFreshGracefulShutdownRecoveryMarker(marker, observedAt, maxAgeMs))
   );
 }
 
@@ -169,10 +230,7 @@ export function isEligibleAfterGracefulShutdown(
     !thread.hasPendingUserInput &&
     thread.recovery == null &&
     thread.latestUserMessageAt === descriptor.latestUserMessageAt &&
-    thread.latestTurn?.turnId === descriptor.interruptedTurnId &&
-    thread.latestTurn.state === "interrupted" &&
-    thread.session?.status === "stopped" &&
-    thread.session.activeTurnId === null
+    hasGracefulShutdownLifecycle(thread, descriptor.interruptedTurnId, "after-grace")
   );
 }
 
