@@ -1,6 +1,7 @@
 import type {
   ProviderInstanceId,
   ProviderDriverKind,
+  ProviderSessionRecovery,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
   ThreadId,
@@ -34,6 +35,30 @@ export interface ProviderRuntimeBindingWithMetadata extends ProviderRuntimeBindi
   readonly lastSeenAt: string;
 }
 
+export interface ProviderRuntimeCandidateBinding {
+  readonly threadId: ThreadId;
+  readonly recoveryId: string;
+  readonly recovery: ProviderSessionRecovery;
+  readonly resumeCursor: unknown | null;
+  readonly runtimePayload: unknown | null;
+  readonly status: "staged" | "dispatch-committed" | "turn-started";
+  readonly turnId: string | null;
+  readonly updatedAt: string;
+}
+
+export interface StageProviderRuntimeCandidateInput {
+  readonly threadId: ThreadId;
+  readonly recoveryId: string;
+  readonly recovery: ProviderSessionRecovery;
+  readonly resumeCursor: unknown | null;
+  readonly runtimePayload: unknown | null;
+}
+
+export interface ProviderRuntimeCandidateKey {
+  readonly threadId: ThreadId;
+  readonly recoveryId: string;
+}
+
 export type ProviderSessionDirectoryReadError = ProviderSessionDirectoryPersistenceError;
 
 export type ProviderSessionDirectoryWriteError =
@@ -62,6 +87,37 @@ export interface ProviderSessionDirectoryShape {
     ReadonlyArray<ProviderRuntimeBindingWithMetadata>,
     ProviderSessionDirectoryPersistenceError
   >;
+
+  readonly stageCandidate: (
+    input: StageProviderRuntimeCandidateInput,
+  ) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
+
+  readonly getCandidate: (
+    input: ProviderRuntimeCandidateKey,
+  ) => Effect.Effect<
+    Option.Option<ProviderRuntimeCandidateBinding>,
+    ProviderSessionDirectoryPersistenceError
+  >;
+  readonly listCandidates: () => Effect.Effect<
+    ReadonlyArray<ProviderRuntimeCandidateBinding>,
+    ProviderSessionDirectoryPersistenceError
+  >;
+
+  readonly markCandidateDispatchCommitted: (
+    input: ProviderRuntimeCandidateKey,
+  ) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
+
+  readonly markCandidateTurnStarted: (
+    input: ProviderRuntimeCandidateKey & { readonly turnId: string },
+  ) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
+
+  readonly promoteCandidate: (
+    input: ProviderRuntimeCandidateKey,
+  ) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
+
+  readonly rollbackCandidate: (
+    input: ProviderRuntimeCandidateKey,
+  ) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
 }
 
 export class ProviderSessionDirectory extends Context.Service<

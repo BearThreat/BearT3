@@ -19,6 +19,7 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionRecovery,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   ThreadId,
@@ -36,6 +37,36 @@ import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  readonly prepareCandidateRecovery?: (input: {
+    readonly threadId: ThreadId;
+    readonly recoveryId: string;
+    readonly recovery: ProviderSessionRecovery;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
+  readonly startCandidateSession?: (input: {
+    readonly recoveryId: string;
+    readonly recovery: ProviderSessionRecovery;
+    readonly session: ProviderSessionStartInput;
+  }) => Effect.Effect<ProviderSession, ProviderServiceError>;
+  readonly listRecoveryCandidates?: () => Effect.Effect<
+    ReadonlyArray<import("./ProviderSessionDirectory.ts").ProviderRuntimeCandidateBinding>,
+    ProviderServiceError
+  >;
+
+  readonly sendCandidateTurn?: (input: {
+    readonly recoveryId: string;
+    readonly turn: ProviderSendTurnInput;
+  }) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
+
+  readonly promoteCandidateSession?: (input: {
+    readonly threadId: ThreadId;
+    readonly recoveryId: string;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
+
+  readonly rollbackCandidateSession?: (input: {
+    readonly threadId: ThreadId;
+    readonly recoveryId: string;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
+
   /**
    * Start a provider session.
    */

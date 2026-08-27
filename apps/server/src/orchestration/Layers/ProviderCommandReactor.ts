@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -9,13 +10,16 @@ import {
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type RuntimeMode,
   type TurnId,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
+import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -26,8 +30,10 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { ServerConfig } from "../../config.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import type { ProviderResumeFailureReason } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -46,8 +52,14 @@ import {
 } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { buildProviderRecoveryContext } from "../ProviderRecoveryContext.ts";
+import { writeProviderRecoveryBundle } from "../ProviderRecoveryBundle.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+
+class ProviderRecoveryBundleWriteError extends Data.TaggedError(
+  "ProviderRecoveryBundleWriteError",
+)<{ readonly cause: unknown }> {}
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -59,7 +71,8 @@ type ProviderIntentEvent = Extract<
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
+      | "thread.session-stop-requested"
+      | "thread.provider-recovery-set";
   }
 >;
 
@@ -308,6 +321,7 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  const serverConfig = yield* ServerConfig;
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -316,6 +330,11 @@ const make = Effect.gen(function* () {
     timeToLive: HANDLED_TURN_START_KEY_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const recoveredSessionReasons = new Map<ThreadId, ProviderResumeFailureReason>();
+  const recoveredSessions = new Map<
+    ThreadId,
+    import("@t3tools/contracts").ProviderSessionRecovery
+  >();
 
   const hasHandledTurnStartRecently = (key: string) =>
     Cache.getOption(handledTurnStartKeys, key).pipe(
@@ -359,6 +378,36 @@ const make = Effect.gen(function* () {
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
             turnId: input.turnId,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendProviderRecoveryActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly kind: "provider.session.recovery.started" | "provider.session.recovery.submitted";
+    readonly summary: string;
+    readonly reason: ProviderResumeFailureReason;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("provider-recovery-activity"),
+      eventId: serverEventId(),
+    }).pipe(
+      Effect.flatMap(({ commandId, eventId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: eventId,
+            tone: "info",
+            kind: input.kind,
+            summary: input.summary,
+            payload: { reason: input.reason },
+            turnId: null,
             createdAt: input.createdAt,
           },
           createdAt: input.createdAt,
@@ -472,6 +521,7 @@ const make = Effect.gen(function* () {
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
+      readonly recoverySourceMessageId?: MessageId;
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -608,6 +658,7 @@ const make = Effect.gen(function* () {
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
+      readonly resumePolicy?: "allow" | "fresh";
     }) =>
       providerService.startSession(threadId, {
         threadId,
@@ -617,8 +668,89 @@ const make = Effect.gen(function* () {
         ...(thread.title ? { title: thread.title } : {}),
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+        ...(input?.resumePolicy !== undefined ? { resumePolicy: input.resumePolicy } : {}),
         runtimeMode: desiredRuntimeMode,
       });
+
+    const startProviderSessionWithRecovery = (input?: { readonly resumeCursor?: unknown }) =>
+      startProviderSession(input).pipe(
+        Effect.catchTag("ProviderAdapterResumeError", (error) =>
+          Effect.gen(function* () {
+            const sourceMessageId = options?.recoverySourceMessageId;
+            if (
+              sourceMessageId === undefined ||
+              providerService.startCandidateSession === undefined
+            ) {
+              return yield* error;
+            }
+            const recoveryId = `recovery:${threadId}:${sourceMessageId}`;
+            const baseRecovery = {
+              recoveryId,
+              sourceMessageId,
+              providerInstanceId: desiredInstanceId,
+              reason: error.reason,
+              phase: "prepared" as const,
+              contextDigest: `context-v1:${threadId}:${sourceMessageId}`,
+              contextVersion: 1 as const,
+              startKey: `${recoveryId}:start`,
+              dispatchKey: `${recoveryId}:dispatch`,
+              preparedAt: createdAt,
+              updatedAt: createdAt,
+            };
+            yield* orchestrationEngine.dispatch({
+              type: "thread.provider-recovery.set",
+              commandId: CommandId.make(baseRecovery.startKey),
+              threadId,
+              recovery: baseRecovery,
+              createdAt,
+            });
+            if (providerService.prepareCandidateRecovery !== undefined) {
+              yield* providerService.prepareCandidateRecovery({
+                threadId,
+                recoveryId,
+                recovery: baseRecovery,
+              });
+            }
+            yield* appendProviderRecoveryActivity({
+              threadId,
+              kind: "provider.session.recovery.started",
+              summary: "Rebuilding provider context",
+              reason: error.reason,
+              createdAt,
+            }).pipe(Effect.ignore);
+            const candidate = yield* providerService.startCandidateSession({
+              recoveryId,
+              recovery: { ...baseRecovery, phase: "candidate-started" },
+              session: {
+                threadId,
+                provider: preferredProvider,
+                providerInstanceId: desiredInstanceId,
+                ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+                ...(thread.title ? { title: thread.title } : {}),
+                modelSelection: desiredModelSelection,
+                resumePolicy: "fresh",
+                runtimeMode: desiredRuntimeMode,
+              },
+            });
+            yield* orchestrationEngine.dispatch({
+              type: "thread.provider-recovery.set",
+              commandId: CommandId.make(`${baseRecovery.startKey}:candidate`),
+              threadId,
+              recovery: {
+                ...baseRecovery,
+                phase: "candidate-started",
+              },
+              createdAt,
+            });
+            recoveredSessions.set(threadId, {
+              ...baseRecovery,
+              phase: "candidate-started",
+            });
+            recoveredSessionReasons.set(threadId, error.reason);
+            return candidate;
+          }),
+        ),
+      );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -701,7 +833,7 @@ const make = Effect.gen(function* () {
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
       });
-      const restartedSession = yield* startProviderSession(
+      const restartedSession = yield* startProviderSessionWithRecovery(
         resumeCursor !== undefined ? { resumeCursor } : undefined,
       );
       yield* Effect.logInfo("provider command reactor restarted provider session", {
@@ -716,13 +848,14 @@ const make = Effect.gen(function* () {
       return restartedSession.threadId;
     }
 
-    const startedSession = yield* startProviderSession(undefined);
+    const startedSession = yield* startProviderSessionWithRecovery(undefined);
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   });
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly messageId: MessageId;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -738,11 +871,65 @@ const make = Effect.gen(function* () {
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       pendingTurnStart: true,
+      recoverySourceMessageId: input.messageId,
     });
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
+    const recoveryReason = recoveredSessionReasons.get(input.threadId);
+    const recoveryMarker = "[Current user request after provider-session recovery]";
+    const recoveryProject =
+      recoveryReason === undefined ? undefined : yield* resolveProject(thread.projectId);
+    const recoveryCwd =
+      recoveryReason === undefined
+        ? undefined
+        : resolveThreadWorkspaceCwd({
+            thread,
+            projects: recoveryProject ? [recoveryProject] : [],
+          });
+    const recoveryNowMs = yield* Clock.currentTimeMillis;
+    const recoveryBundle =
+      recoveryReason === undefined || recoveryCwd === undefined
+        ? undefined
+        : yield* Effect.try({
+            try: () =>
+              writeProviderRecoveryBundle({
+                cwd: recoveryCwd,
+                attachmentsDir: serverConfig.attachmentsDir,
+                threadId: input.threadId,
+                currentMessageId: input.messageId,
+                messages: thread.messages,
+                nowMs: recoveryNowMs,
+              }),
+            catch: (cause) => new ProviderRecoveryBundleWriteError({ cause }),
+          }).pipe(
+            Effect.tapError((cause) =>
+              Effect.logWarning("provider recovery bundle creation failed", {
+                threadId: input.threadId,
+                cause,
+              }),
+            ),
+            Effect.option,
+            Effect.map(Option.getOrUndefined),
+          );
+    const recoveryReference =
+      recoveryBundle === undefined
+        ? ""
+        : `\n\nSupplemental bounded history manifest: ${recoveryBundle.manifestRelativePath}\nRead it only if the bounded transcript does not contain information needed for this request.`;
+    const recoveryOverhead = `${recoveryReference}\n\n${recoveryMarker}\n`.length;
+    const recoveryContextBudget = Math.max(
+      0,
+      PROVIDER_SEND_TURN_MAX_INPUT_CHARS - (normalizedInput?.length ?? 0) - recoveryOverhead,
+    );
+    const recoveryContext =
+      recoveryReason === undefined
+        ? undefined
+        : buildProviderRecoveryContext(thread.messages, input.messageId, recoveryContextBudget);
+    const providerInput =
+      recoveryContext === undefined || recoveryContext.length === 0
+        ? normalizedInput
+        : `${recoveryContext}${recoveryReference}\n\n${recoveryMarker}\n${normalizedInput ?? "[Attachment-only request]"}`;
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
       .listSessions()
@@ -774,7 +961,7 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
-      ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(providerInput ? { input: providerInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
@@ -1152,6 +1339,7 @@ const make = Effect.gen(function* () {
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
@@ -1168,9 +1356,62 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    const dispatchTurn = Effect.gen(function* () {
+      const recovery = recoveredSessions.get(event.payload.threadId);
+      if (
+        recovery !== undefined &&
+        recovery !== null &&
+        recovery.phase === "candidate-started" &&
+        providerService.sendCandidateTurn !== undefined
+      ) {
+        const committed = { ...recovery, phase: "dispatch-committed" as const };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(recovery.dispatchKey),
+          threadId: event.payload.threadId,
+          recovery: committed,
+          createdAt: event.payload.createdAt,
+        });
+        const result = yield* providerService.sendCandidateTurn({
+          recoveryId: recovery.recoveryId,
+          turn: sendTurnRequest.value,
+        });
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(`${recovery.dispatchKey}:started`),
+          threadId: event.payload.threadId,
+          recovery: { ...committed, phase: "turn-started", candidateTurnId: result.turnId },
+          createdAt: event.payload.createdAt,
+        });
+        recoveredSessions.set(event.payload.threadId, {
+          ...committed,
+          phase: "turn-started",
+          candidateTurnId: result.turnId,
+        });
+        return result;
+      }
+      return yield* providerService.sendTurn(sendTurnRequest.value);
+    });
+
+    yield* dispatchTurn.pipe(
+      Effect.tap(() =>
+        Effect.gen(function* () {
+          const reason = recoveredSessionReasons.get(event.payload.threadId);
+          if (reason !== undefined) {
+            yield* appendProviderRecoveryActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.session.recovery.submitted",
+              summary: "Recovery context submitted",
+              reason,
+              createdAt: event.payload.createdAt,
+            }).pipe(Effect.ignore);
+          }
+          recoveredSessionReasons.delete(event.payload.threadId);
+        }),
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
@@ -1358,6 +1599,110 @@ const make = Effect.gen(function* () {
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
+      case "thread.provider-recovery-set": {
+        const recovery = event.payload.recovery;
+        if (
+          recovery.phase !== "prepared" ||
+          providerService.startCandidateSession === undefined ||
+          providerService.sendCandidateTurn === undefined
+        ) {
+          return;
+        }
+        const thread = yield* resolveThread(event.payload.threadId);
+        if (thread === undefined) {
+          return;
+        }
+        const activeRecovery = recoveredSessions.get(thread.id);
+        if (activeRecovery?.recoveryId === recovery.recoveryId) {
+          return;
+        }
+        const source = thread.messages.find((message) => message.id === recovery.sourceMessageId);
+        if (source?.role !== "user") {
+          return;
+        }
+        const project = yield* resolveProject(thread.projectId);
+        const cwd = resolveThreadWorkspaceCwd({
+          thread,
+          projects: project ? [project] : [],
+        });
+        if (providerService.prepareCandidateRecovery !== undefined) {
+          yield* providerService.prepareCandidateRecovery({
+            threadId: thread.id,
+            recoveryId: recovery.recoveryId,
+            recovery,
+          });
+        }
+        yield* appendProviderRecoveryActivity({
+          threadId: thread.id,
+          kind: "provider.session.recovery.started",
+          summary: "Rebuilding provider context",
+          reason: recovery.reason,
+          createdAt: event.occurredAt,
+        }).pipe(Effect.ignore);
+        yield* providerService.startCandidateSession({
+          recoveryId: recovery.recoveryId,
+          recovery: { ...recovery, phase: "candidate-started" },
+          session: {
+            threadId: thread.id,
+            providerInstanceId: recovery.providerInstanceId,
+            ...(cwd ? { cwd } : {}),
+            ...(thread.title ? { title: thread.title } : {}),
+            modelSelection: thread.modelSelection,
+            resumePolicy: "fresh",
+            runtimeMode: thread.runtimeMode,
+          },
+        });
+        const started = { ...recovery, phase: "candidate-started" as const };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(`${recovery.startKey}:candidate`),
+          threadId: thread.id,
+          recovery: started,
+          createdAt: event.occurredAt,
+        });
+        recoveredSessions.set(thread.id, started);
+        recoveredSessionReasons.set(thread.id, recovery.reason);
+
+        const marker = "[Current user request after provider-session recovery]";
+        const context = buildProviderRecoveryContext(
+          thread.messages,
+          recovery.sourceMessageId,
+          Math.max(0, PROVIDER_SEND_TURN_MAX_INPUT_CHARS - source.text.length - marker.length - 4),
+        );
+        const recoveredInput = context ? `${context}\n\n${marker}\n${source.text}` : source.text;
+        const committed = { ...started, phase: "dispatch-committed" as const };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(recovery.dispatchKey),
+          threadId: thread.id,
+          recovery: committed,
+          createdAt: event.occurredAt,
+        });
+        const result = yield* providerService.sendCandidateTurn({
+          recoveryId: recovery.recoveryId,
+          turn: {
+            threadId: thread.id,
+            input: recoveredInput,
+            ...(source.attachments !== undefined ? { attachments: source.attachments } : {}),
+            modelSelection: thread.modelSelection,
+            interactionMode: thread.interactionMode,
+          },
+        });
+        const turnStarted = {
+          ...committed,
+          phase: "turn-started" as const,
+          candidateTurnId: result.turnId,
+        };
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(`${recovery.dispatchKey}:started`),
+          threadId: thread.id,
+          recovery: turnStarted,
+          createdAt: event.occurredAt,
+        });
+        recoveredSessions.set(thread.id, turnStarted);
+        return;
+      }
     }
   });
 
@@ -1375,6 +1720,104 @@ const make = Effect.gen(function* () {
     );
 
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
+
+  const reconcileProviderRecoveries = Effect.gen(function* () {
+    if (providerService.listRecoveryCandidates === undefined) return;
+    const candidates = yield* providerService.listRecoveryCandidates();
+    const snapshot = yield* projectionSnapshotQuery.getSnapshot();
+    for (const candidate of candidates) {
+      const recovery = candidate.recovery;
+      const thread = snapshot.threads.find((entry) => entry.id === candidate.threadId);
+      if (thread === undefined) continue;
+      if (candidate.status === "dispatch-committed") {
+        yield* orchestrationEngine
+          .dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.recoveryId}:uncertain`),
+            threadId: thread.id,
+            recovery: {
+              ...recovery,
+              phase: "failed",
+              failure:
+                "Provider delivery outcome is uncertain after restart; automatic resend was suppressed.",
+              updatedAt: thread.updatedAt,
+            },
+            createdAt: thread.updatedAt,
+          })
+          .pipe(Effect.ignore);
+        if (providerService.rollbackCandidateSession !== undefined) {
+          yield* providerService.rollbackCandidateSession({
+            threadId: thread.id,
+            recoveryId: recovery.recoveryId,
+          });
+        }
+        continue;
+      }
+      if (providerService.startCandidateSession === undefined) continue;
+      yield* providerService.startCandidateSession({
+        recoveryId: recovery.recoveryId,
+        recovery: { ...recovery, phase: "candidate-started" },
+        session: {
+          threadId: thread.id,
+          providerInstanceId: recovery.providerInstanceId,
+          modelSelection: thread.modelSelection,
+          runtimeMode: thread.runtimeMode,
+          resumePolicy: candidate.resumeCursor == null ? "fresh" : "allow",
+        },
+      });
+      const started = { ...recovery, phase: "candidate-started" as const };
+      if (recovery.phase === "prepared") {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.provider-recovery.set",
+          commandId: CommandId.make(`${recovery.startKey}:candidate`),
+          threadId: thread.id,
+          recovery: started,
+          createdAt: thread.updatedAt,
+        });
+      }
+      if (candidate.status === "turn-started" || providerService.sendCandidateTurn === undefined)
+        continue;
+      const source = thread.messages.find((message) => message.id === recovery.sourceMessageId);
+      if (source === undefined) continue;
+      const context = buildProviderRecoveryContext(
+        thread.messages,
+        recovery.sourceMessageId,
+        PROVIDER_SEND_TURN_MAX_INPUT_CHARS - source.text.length - 80,
+      );
+      const committed = { ...started, phase: "dispatch-committed" as const };
+      yield* orchestrationEngine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(recovery.dispatchKey),
+        threadId: thread.id,
+        recovery: committed,
+        createdAt: thread.updatedAt,
+      });
+      const result = yield* providerService.sendCandidateTurn({
+        recoveryId: recovery.recoveryId,
+        turn: {
+          threadId: thread.id,
+          input: `${context}\n\n[Current user request after provider-session recovery]\n${source.text}`,
+          ...(source.attachments !== undefined ? { attachments: source.attachments } : {}),
+          modelSelection: thread.modelSelection,
+          interactionMode: thread.interactionMode,
+        },
+      });
+      yield* orchestrationEngine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(`${recovery.dispatchKey}:started`),
+        threadId: thread.id,
+        recovery: { ...committed, phase: "turn-started", candidateTurnId: result.turnId },
+        createdAt: thread.updatedAt,
+      });
+    }
+  });
+  const reconcileProviderRecoveriesSafely = reconcileProviderRecoveries.pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("provider recovery startup reconciliation failed", {
+        cause: Cause.pretty(cause),
+      }),
+    ),
+  );
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(
@@ -1396,7 +1839,8 @@ const make = Effect.gen(function* () {
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
+        event.type === "thread.session-stop-requested" ||
+        event.type === "thread.provider-recovery-set"
       ) {
         return yield* worker.enqueue(event);
       }
@@ -1425,8 +1869,10 @@ const make = Effect.gen(function* () {
     const activation = yield* ServerActivation;
     if (activation === undefined) {
       yield* clearInterrupted;
+      yield* reconcileProviderRecoveriesSafely;
     } else {
       yield* forkParked(clearInterrupted);
+      yield* forkParked(reconcileProviderRecoveriesSafely);
     }
   });
 

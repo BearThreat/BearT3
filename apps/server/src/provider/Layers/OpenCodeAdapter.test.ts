@@ -238,6 +238,13 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   getBinding: () => Effect.succeed(Option.none()),
   listThreadIds: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
+  stageCandidate: () => Effect.succeed(false),
+  getCandidate: () => Effect.succeed(Option.none()),
+  listCandidates: () => Effect.succeed([]),
+  markCandidateDispatchCommitted: () => Effect.succeed(false),
+  markCandidateTurnStarted: () => Effect.succeed(false),
+  promoteCandidate: () => Effect.succeed(false),
+  rollbackCandidate: () => Effect.succeed(false),
 });
 
 // The adapter now receives its settings as a plain argument (the old design
@@ -388,29 +395,28 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
-  it.effect("falls back to a fresh session when the persisted session is gone", () =>
+  it.effect("classifies a missing persisted session for orchestration recovery", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
       const threadId = asThreadId("thread-opencode-stale");
       runtimeMock.state.missingSessionIds.add("ses_stale");
 
-      const session = yield* adapter.startSession({
-        provider: ProviderDriverKind.make("opencode"),
-        threadId,
-        runtimeMode: "full-access",
-        resumeCursor: { schemaVersion: 1, sessionId: "ses_stale" },
-      });
+      const error = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "ses_stale" },
+        })
+        .pipe(Effect.flip);
 
-      // get probed the stale id, found nothing, then created a new session and
-      // emitted a fresh cursor rather than wedging the thread.
       NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_stale"]);
-      NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, ["http://127.0.0.1:9999"]);
-      NodeAssert.deepEqual(session.resumeCursor, {
-        schemaVersion: 1,
-        sessionId: "http://127.0.0.1:9999/session",
-      });
-
-      yield* adapter.stopSession(threadId);
+      NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
+      NodeAssert.equal(error._tag, "ProviderAdapterResumeError");
+      if (error._tag === "ProviderAdapterResumeError") {
+        NodeAssert.equal(error.reason, "session_missing");
+        NodeAssert.equal(error.method, "session.get");
+      }
     }),
   );
 

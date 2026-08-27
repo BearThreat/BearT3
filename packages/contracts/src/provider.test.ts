@@ -43,6 +43,16 @@ describe("ProviderSessionStartInput", () => {
     expect(getOptionValue(parsed.modelSelection?.options, "fastMode")).toBe(true);
   });
 
+  it("accepts an explicit fresh-session policy", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "codex",
+      runtimeMode: "full-access",
+      resumePolicy: "fresh",
+    });
+    expect(parsed.resumePolicy).toBe("fresh");
+  });
+
   it("rejects payloads without runtime mode", () => {
     expect(() =>
       decodeProviderSessionStartInput({

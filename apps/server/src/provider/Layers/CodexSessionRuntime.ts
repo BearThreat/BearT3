@@ -40,6 +40,9 @@ import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2ThreadResumeResponse,
+);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -449,6 +452,12 @@ type CodexThreadOpenResponse =
 type CodexThreadOpenMethod = "thread/start" | "thread/resume";
 
 interface CodexThreadOpenClient {
+  readonly raw: {
+    readonly request: (
+      method: string,
+      payload?: unknown,
+    ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  };
   readonly request: <M extends CodexThreadOpenMethod>(
     method: M,
     payload: CodexRpc.ClientRequestParamsByMethod[M],
@@ -476,20 +485,25 @@ export const openCodexThread = (input: {
     return input.client.request("thread/start", startParams);
   }
 
-  return input.client
+  return input.client.raw
     .request("thread/resume", {
       threadId: resumeThreadId,
       ...startParams,
+      // BearT3 owns the visible transcript. Do not make Codex rebuild and
+      // return all historical turns when only native session resume is needed.
+      excludeTurns: true,
     })
     .pipe(
-      Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-          threadId: input.threadId,
-          requestedRuntimeMode: input.runtimeMode,
-          resumeThreadId,
-          recoverable: true,
-          cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
+      Effect.flatMap((rawResponse) =>
+        decodeV2ThreadResumeResponse(rawResponse).pipe(
+          Effect.mapError((error) =>
+            CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+              "decode-response-payload",
+              error,
+              { method: "thread/resume" },
+            ),
+          ),
+        ),
       ),
     );
 };

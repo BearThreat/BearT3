@@ -182,12 +182,64 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       ),
     );
 
+  const candidateUpdatedAt = Effect.map(DateTime.now, DateTime.formatIso);
+
+  const stageCandidate: ProviderSessionDirectoryShape["stageCandidate"] = (input) =>
+    Effect.flatMap(candidateUpdatedAt, (updatedAt) =>
+      repository.stageCandidate({ ...input, updatedAt }),
+    ).pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.stageCandidate")));
+
+  const getCandidate: ProviderSessionDirectoryShape["getCandidate"] = (input) =>
+    repository
+      .getCandidate(input)
+      .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.getCandidate")));
+  const listCandidates: ProviderSessionDirectoryShape["listCandidates"] = () =>
+    repository
+      .listCandidates()
+      .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.listCandidates")));
+
+  const markCandidateDispatchCommitted: ProviderSessionDirectoryShape["markCandidateDispatchCommitted"] =
+    (input) =>
+      Effect.flatMap(candidateUpdatedAt, (updatedAt) =>
+        repository.markCandidateDispatchCommitted({ ...input, updatedAt }),
+      ).pipe(
+        Effect.mapError(
+          toPersistenceError("ProviderSessionDirectory.markCandidateDispatchCommitted"),
+        ),
+      );
+
+  const markCandidateTurnStarted: ProviderSessionDirectoryShape["markCandidateTurnStarted"] = (
+    input,
+  ) =>
+    Effect.flatMap(candidateUpdatedAt, (updatedAt) =>
+      repository.markCandidateTurnStarted({ ...input, updatedAt }),
+    ).pipe(
+      Effect.mapError(toPersistenceError("ProviderSessionDirectory.markCandidateTurnStarted")),
+    );
+
+  const promoteCandidate: ProviderSessionDirectoryShape["promoteCandidate"] = (input) =>
+    repository
+      .promoteCandidate(input)
+      .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.promoteCandidate")));
+
+  const rollbackCandidate: ProviderSessionDirectoryShape["rollbackCandidate"] = (input) =>
+    repository
+      .rollbackCandidate(input)
+      .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.rollbackCandidate")));
+
   return {
     upsert,
     getProvider,
     getBinding,
     listThreadIds,
     listBindings,
+    stageCandidate,
+    getCandidate,
+    listCandidates,
+    markCandidateDispatchCommitted,
+    markCandidateTurnStarted,
+    promoteCandidate,
+    rollbackCandidate,
   } satisfies ProviderSessionDirectoryShape;
 });
 

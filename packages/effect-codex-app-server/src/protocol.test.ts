@@ -397,6 +397,45 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 
+  it.effect("rejects an oversized incoming line before it is decoded", () =>
+    Effect.gen(function* () {
+      const secret = "oversized-wire-payload-sentinel";
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const termination = yield* Deferred.make<CodexError.CodexAppServerError>();
+      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingMessageBytes: 32,
+        onTermination: (error) => Deferred.succeed(termination, error).pipe(Effect.asVoid),
+      });
+
+      yield* Queue.offer(input, encoder.encode(`{"id":1,"result":"${secret}`));
+
+      const error = yield* Deferred.await(termination);
+      assert.instanceOf(error, CodexError.CodexAppServerIncomingMessageTooLargeError);
+      assert.deepInclude(error, {
+        limitBytes: 32,
+        observedBytes: 33,
+      });
+      assert.notInclude(error.message, secret);
+    }),
+  );
+
+  it.effect("accepts an incoming line at the configured byte limit", () =>
+    Effect.gen(function* () {
+      const response = encodeUnknownJsonString({ id: 1, result: "ok" });
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const protocol = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingMessageBytes: encoder.encode(response).byteLength,
+      });
+      const pending = yield* protocol.request("thread/resume", {}).pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Queue.offer(input, encoder.encode(`${response}\n`));
+
+      assert.equal(yield* Fiber.join(pending), "ok");
+    }),
+  );
+
   it.effect("describes unroutable messages with safe structural diagnostics", () =>
     Effect.gen(function* () {
       const secret = "codex-unroutable-secret-sentinel";

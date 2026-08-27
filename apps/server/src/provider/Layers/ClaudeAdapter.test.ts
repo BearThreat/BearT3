@@ -341,6 +341,46 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("classifies a synchronous missing Claude resume session", () => {
+    const cause = new Error("Unknown session: session-gone");
+    const layer = Layer.effect(
+      ClaudeAdapter,
+      Effect.gen(function* () {
+        const claudeConfig = decodeClaudeSettings({});
+        return yield* makeClaudeAdapter(claudeConfig, {
+          createQuery: () => {
+            throw cause;
+          },
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const error = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: { resume: "00000000-0000-4000-8000-000000000099" },
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterResumeError");
+      if (error._tag === "ProviderAdapterResumeError") {
+        assert.equal(error.reason, "session_missing");
+        assert.equal(error.method, "query/resume");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(layer),
+    );
+  });
+
   it.effect("derives bypass permission mode from full-access runtime policy", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -1941,6 +1981,68 @@ describe("ClaudeAdapterLive", () => {
       if (completed?.type === "turn.completed") {
         assert.equal(completed.payload.state, "failed");
         assert.equal(completed.payload.errorMessage, "Claude runtime stream failed.");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("classifies a missing resume session rejected by the async query iterator", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: { resume: "00000000-0000-4000-8000-000000000099" },
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "continue",
+        attachments: [],
+      });
+
+      harness.query.fail(new Error("Unknown session: 00000000-0000-4000-8000-000000000099"));
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(
+          runtimeError.payload.message,
+          "Claude cannot find the persisted provider session.",
+        );
+        assert.deepEqual(runtimeError.payload.detail, {
+          failureCount: 1,
+          failureTags: ["ProviderAdapterResumeError"],
+        });
+        assert.deepEqual(runtimeError.payload.resumeFailure, {
+          reason: "session_missing",
+          method: "query/resume",
+        });
+      }
+
+      const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") {
+        assert.equal(completed.payload.state, "failed");
+        assert.equal(
+          completed.payload.errorMessage,
+          "Claude cannot find the persisted provider session.",
+        );
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

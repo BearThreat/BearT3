@@ -49,7 +49,11 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import {
+  acpPermissionOutcome,
+  mapAcpResumeError,
+  mapAcpToAdapterError,
+} from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -737,7 +741,9 @@ export function makeCursorAdapter(
             return yield* acp.start();
           }).pipe(
             Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
+              resumeSessionId
+                ? mapAcpResumeError(PROVIDER, input.threadId, error)
+                : mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
             ),
           );
 

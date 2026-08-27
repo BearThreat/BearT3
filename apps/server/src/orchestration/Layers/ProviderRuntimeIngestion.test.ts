@@ -2714,6 +2714,69 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("runtime exploded");
   });
 
+  it("prepares one durable recovery from a typed async resume failure", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const messageId = asMessageId("message-async-resume");
+    const turnId = asTurnId("turn-async-resume");
+    const now = "2026-01-01T00:00:01.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-async-resume-turn"),
+      threadId,
+      message: {
+        messageId,
+        role: "user",
+        text: "continue exactly once",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-async-resume-turn-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      createdAt: now,
+      threadId,
+      turnId,
+      payload: {},
+    });
+    await waitForThread(harness.readModel, (entry) => entry.session?.activeTurnId === turnId);
+
+    const resumeError = {
+      type: "runtime.error" as const,
+      eventId: asEventId("evt-async-resume-error"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      createdAt: now,
+      threadId,
+      turnId,
+      payload: {
+        message: "Claude cannot find the persisted provider session.",
+        resumeFailure: { reason: "session_missing" as const, method: "query/resume" },
+      },
+    };
+    harness.emit(resumeError);
+    harness.emit(resumeError);
+
+    await harness.drain();
+    const events = await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0, 1000)));
+    const recoveryEvents = Array.from(events).filter(
+      (event) => event.type === "thread.provider-recovery-set",
+    );
+    expect(recoveryEvents).toHaveLength(1);
+    expect(recoveryEvents[0]?.payload.recovery).toMatchObject({
+      recoveryId: `recovery:${threadId}:${messageId}`,
+      sourceMessageId: messageId,
+      reason: "session_missing",
+      phase: "prepared",
+    });
+  });
+
   it("records runtime.error activities from the typed payload message", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

@@ -894,6 +894,11 @@ const make = Effect.gen(function* () {
     timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
     lookup: () => Effect.succeed(new Set<MessageId>()),
   });
+  const sourceMessageIdByTurnKey = yield* Cache.make<string, MessageId>({
+    capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
+    timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
+    lookup: () => Effect.die(new Error("turn source message must be recorded before lookup")),
+  });
 
   const bufferedAssistantTextByMessageId = yield* Cache.make<MessageId, string>({
     capacity: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY,
@@ -1504,6 +1509,17 @@ const make = Effect.gen(function* () {
       });
       const hasPendingTurnStart =
         Option.isSome(pendingTurnStart) && thread.session?.status === "starting";
+      if (
+        event.type === "turn.started" &&
+        eventTurnId !== undefined &&
+        Option.isSome(pendingTurnStart)
+      ) {
+        yield* Cache.set(
+          sourceMessageIdByTurnKey,
+          providerTurnKey(thread.id, eventTurnId),
+          pendingTurnStart.value.messageId,
+        );
+      }
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -1557,6 +1573,44 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
           : null;
+
+      const recoveryCandidate =
+        event.type === "turn.completed" && providerService.listRecoveryCandidates !== undefined
+          ? (yield* providerService.listRecoveryCandidates()).find(
+              (candidate) => candidate.threadId === thread.id,
+            )
+          : undefined;
+      const recovery = recoveryCandidate?.recovery;
+      if (
+        event.type === "turn.completed" &&
+        shouldApplyThreadLifecycle &&
+        normalizeRuntimeTurnState(event.payload.state) === "completed" &&
+        recoveryCandidate?.status === "turn-started" &&
+        recovery !== undefined &&
+        eventTurnId !== undefined &&
+        recoveryCandidate.turnId === eventTurnId &&
+        event.providerInstanceId === recovery.providerInstanceId &&
+        providerService.promoteCandidateSession !== undefined
+      ) {
+        const promoted = yield* providerService.promoteCandidateSession({
+          threadId: thread.id,
+          recoveryId: recovery.recoveryId,
+        });
+        if (promoted) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.recoveryId}:promote`),
+            threadId: thread.id,
+            recovery: {
+              ...recovery,
+              phase: "promoted",
+              candidateTurnId: eventTurnId,
+              updatedAt: now,
+            },
+            createdAt: now,
+          });
+        }
+      }
 
       if (
         event.type === "session.started" ||
@@ -1873,6 +1927,56 @@ const make = Effect.gen(function* () {
 
       if (event.type === "runtime.error") {
         const runtimeErrorMessage = event.payload.message;
+
+        if (event.payload.resumeFailure !== undefined && eventTurnId !== undefined) {
+          const turn = yield* projectionTurnRepository.getByTurnId({
+            threadId: thread.id,
+            turnId: eventTurnId,
+          });
+          const cachedSourceMessageId = yield* Cache.getOption(
+            sourceMessageIdByTurnKey,
+            providerTurnKey(thread.id, eventTurnId),
+          );
+          let sourceMessageId = Option.getOrElse(cachedSourceMessageId, () =>
+            Option.isSome(turn) ? turn.value.pendingMessageId : null,
+          );
+          if (sourceMessageId === null) {
+            const detailedThread = yield* getLoadedThreadDetail();
+            sourceMessageId =
+              detailedThread?.messages.findLast(
+                (message) => message.role === "user" && message.streaming === false,
+              )?.id ?? null;
+          }
+          const providerInstanceId = event.providerInstanceId ?? thread.session?.providerInstanceId;
+          const currentRecovery = thread.recovery ?? null;
+          const canPrepareRecovery =
+            currentRecovery === null ||
+            currentRecovery.phase === "promoted" ||
+            currentRecovery.phase === "rolled-back" ||
+            currentRecovery.phase === "failed";
+          if (sourceMessageId !== null && providerInstanceId !== undefined && canPrepareRecovery) {
+            const recoveryId = `recovery:${thread.id}:${sourceMessageId}`;
+            yield* orchestrationEngine.dispatch({
+              type: "thread.provider-recovery.set",
+              commandId: CommandId.make(`${recoveryId}:start`),
+              threadId: thread.id,
+              recovery: {
+                recoveryId,
+                sourceMessageId,
+                providerInstanceId,
+                reason: event.payload.resumeFailure.reason,
+                phase: "prepared",
+                contextDigest: `context-v1:${thread.id}:${sourceMessageId}`,
+                contextVersion: 1,
+                startKey: `${recoveryId}:start`,
+                dispatchKey: `${recoveryId}:dispatch`,
+                preparedAt: now,
+                updatedAt: now,
+              },
+              createdAt: now,
+            });
+          }
+        }
 
         const shouldApplyRuntimeError = !STRICT_PROVIDER_LIFECYCLE_GUARD
           ? true

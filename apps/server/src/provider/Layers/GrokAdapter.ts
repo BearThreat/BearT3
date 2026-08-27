@@ -41,7 +41,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { mapAcpResumeError, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -731,7 +731,9 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             return yield* acp.start();
           }).pipe(
             Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
+              resumeSessionId
+                ? mapAcpResumeError(PROVIDER, input.threadId, error)
+                : mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
             ),
           );
 

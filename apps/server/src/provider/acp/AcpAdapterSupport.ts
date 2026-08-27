@@ -8,11 +8,46 @@ import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
   ProviderAdapterSessionClosedError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 const isAcpProcessExitedError = Schema.is(EffectAcpErrors.AcpProcessExitedError);
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
+
+export function mapAcpResumeError(
+  provider: ProviderDriverKind,
+  threadId: ThreadId,
+  error: EffectAcpErrors.AcpError,
+): ProviderAdapterError {
+  if (!isAcpRequestError(error)) {
+    return mapAcpToAdapterError(provider, threadId, "session/load", error);
+  }
+
+  const message = error.errorMessage.trim().toLowerCase();
+  const reason =
+    error.code === -32601
+      ? "unsupported_resume"
+      : /(?:unknown|missing|invalid) session|session (?:was )?not found|session .*does not exist/.test(
+            message,
+          )
+        ? "session_missing"
+        : /(?:expired|stale) session|session (?:has )?expired/.test(message)
+          ? "session_stale"
+          : undefined;
+
+  if (!reason) {
+    return mapAcpToAdapterError(provider, threadId, "session/load", error);
+  }
+
+  return new ProviderAdapterResumeError({
+    provider,
+    method: "session/load",
+    reason,
+    detail: `ACP session/load cannot restore the persisted provider session (${reason}).`,
+    cause: error,
+  });
+}
 
 export function mapAcpToAdapterError(
   provider: ProviderDriverKind,

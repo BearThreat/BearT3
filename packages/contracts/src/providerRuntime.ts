@@ -773,6 +773,18 @@ const RuntimeErrorPayload = Schema.Struct({
   message: TrimmedNonEmptyStringSchema,
   class: Schema.optional(RuntimeErrorClass),
   detail: Schema.optional(Schema.Unknown),
+  resumeFailure: Schema.optional(
+    Schema.Struct({
+      reason: Schema.Literals([
+        "payload_too_large",
+        "decode_failed",
+        "session_missing",
+        "session_stale",
+        "unsupported_resume",
+      ]),
+      method: TrimmedNonEmptyStringSchema,
+    }),
+  ),
 });
 export type RuntimeErrorPayload = typeof RuntimeErrorPayload.Type;
 

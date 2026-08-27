@@ -264,6 +264,18 @@ export class CodexAppServerInputStreamEndedError extends Schema.TaggedErrorClass
   }
 }
 
+export class CodexAppServerIncomingMessageTooLargeError extends Schema.TaggedErrorClass<CodexAppServerIncomingMessageTooLargeError>()(
+  "CodexAppServerIncomingMessageTooLargeError",
+  {
+    limitBytes: Schema.Number,
+    observedBytes: Schema.Number,
+  },
+) {
+  override get message() {
+    return `Codex App Server incoming message exceeded the ${this.limitBytes}-byte limit.`;
+  }
+}
+
 export class CodexAppServerRequestError extends Schema.TaggedErrorClass<CodexAppServerRequestError>()(
   "CodexAppServerRequestError",
   {
@@ -422,6 +434,7 @@ export const CodexAppServerError = Schema.Union([
   CodexAppServerTransportError,
   CodexAppServerIdentifierGenerationError,
   CodexAppServerInputStreamEndedError,
+  CodexAppServerIncomingMessageTooLargeError,
 ]);
 
 export type CodexAppServerError = typeof CodexAppServerError.Type;

@@ -9,6 +9,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -34,7 +35,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
+  type ProviderServiceError,
+} from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -150,9 +155,15 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
+    readonly recoveryBeforeStartPhase?:
+      | "prepared"
+      | "candidate-started"
+      | "dispatch-committed"
+      | "turn-started";
+    readonly omitRecoveryProjectionBeforeStart?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
-    ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    ) => Effect.Effect<ProviderSession, ProviderServiceError>;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -163,6 +174,9 @@ describe("ProviderCommandReactor", () => {
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
+    let recoveryCandidateBeforeStart:
+      | import("../../provider/Services/ProviderSessionDirectory.ts").ProviderRuntimeCandidateBinding
+      | undefined;
     const modelSelection = input?.threadModelSelection ?? {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
@@ -310,7 +324,21 @@ describe("ProviderCommandReactor", () => {
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
+      startCandidateSession: ({ session }) =>
+        startSession(session.threadId, session) as ReturnType<
+          NonNullable<ProviderServiceShape["startCandidateSession"]>
+        >,
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
+      sendCandidateTurn: ({ turn }) =>
+        sendTurn(turn) as ReturnType<NonNullable<ProviderServiceShape["sendCandidateTurn"]>>,
+      promoteCandidateSession: () => Effect.succeed(true),
+      rollbackCandidateSession: () =>
+        Effect.sync(() => {
+          recoveryCandidateBeforeStart = undefined;
+          return true;
+        }),
+      listRecoveryCandidates: () =>
+        Effect.succeed(recoveryCandidateBeforeStart ? [recoveryCandidateBeforeStart] : []),
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
@@ -449,6 +477,121 @@ describe("ProviderCommandReactor", () => {
         createdAt: now,
       }),
     );
+    if (input?.recoveryBeforeStartPhase !== undefined) {
+      const messageId = asMessageId("recovery-before-start-message");
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("recovery-before-start-turn"),
+          threadId: ThreadId.make("thread-1"),
+          message: { messageId, role: "user", text: "Resume after crash", attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      const recovery = {
+        recoveryId: `recovery:thread-1:${messageId}`,
+        sourceMessageId: messageId,
+        providerInstanceId: modelSelection.instanceId,
+        reason: "payload_too_large" as const,
+        phase: "prepared" as const,
+        contextDigest: "context-v1:test",
+        contextVersion: 1 as const,
+        startKey: `recovery:thread-1:${messageId}:start`,
+        dispatchKey: `recovery:thread-1:${messageId}:dispatch`,
+        preparedAt: now,
+        updatedAt: now,
+      };
+      if (input.omitRecoveryProjectionBeforeStart !== true) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(recovery.startKey),
+            threadId: ThreadId.make("thread-1"),
+            recovery,
+            createdAt: now,
+          }),
+        );
+      }
+      const candidateRecovery = { ...recovery, phase: "candidate-started" as const };
+      if (
+        input.omitRecoveryProjectionBeforeStart !== true &&
+        input.recoveryBeforeStartPhase !== "prepared"
+      ) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.startKey}:candidate`),
+            threadId: ThreadId.make("thread-1"),
+            recovery: candidateRecovery,
+            createdAt: now,
+          }),
+        );
+      }
+      const dispatchRecovery = { ...candidateRecovery, phase: "dispatch-committed" as const };
+      if (
+        input.omitRecoveryProjectionBeforeStart !== true &&
+        (input.recoveryBeforeStartPhase === "dispatch-committed" ||
+          input.recoveryBeforeStartPhase === "turn-started")
+      ) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(recovery.dispatchKey),
+            threadId: ThreadId.make("thread-1"),
+            recovery: dispatchRecovery,
+            createdAt: now,
+          }),
+        );
+      }
+      const turnRecovery = {
+        ...dispatchRecovery,
+        phase: "turn-started" as const,
+        candidateTurnId: asTurnId("candidate-turn-before-restart"),
+      };
+      if (
+        input.omitRecoveryProjectionBeforeStart !== true &&
+        input.recoveryBeforeStartPhase === "turn-started"
+      ) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.provider-recovery.set",
+            commandId: CommandId.make(`${recovery.dispatchKey}:turn-started`),
+            threadId: ThreadId.make("thread-1"),
+            recovery: turnRecovery,
+            createdAt: now,
+          }),
+        );
+      }
+      const recoveryByPhase =
+        input.recoveryBeforeStartPhase === "prepared"
+          ? recovery
+          : input.recoveryBeforeStartPhase === "turn-started"
+            ? turnRecovery
+            : input.recoveryBeforeStartPhase === "dispatch-committed"
+              ? dispatchRecovery
+              : candidateRecovery;
+      recoveryCandidateBeforeStart = {
+        threadId: ThreadId.make("thread-1"),
+        recoveryId: recovery.recoveryId,
+        recovery: recoveryByPhase,
+        resumeCursor:
+          input.recoveryBeforeStartPhase === "prepared" ? null : { opaque: "candidate" },
+        runtimePayload: input.recoveryBeforeStartPhase === "prepared" ? null : {},
+        status:
+          input.recoveryBeforeStartPhase === "dispatch-committed"
+            ? "dispatch-committed"
+            : input.recoveryBeforeStartPhase === "turn-started"
+              ? "turn-started"
+              : "staged",
+        turnId:
+          input.recoveryBeforeStartPhase === "turn-started"
+            ? asTurnId("candidate-turn-before-restart")
+            : null,
+        updatedAt: now,
+      };
+    }
     if (input?.titleRegenerationBeforeStart === "two") {
       await Effect.runPromise(
         engine.dispatch({
@@ -488,6 +631,13 @@ describe("ProviderCommandReactor", () => {
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
+    const restartReactor = async () => {
+      if (scope) {
+        await Effect.runPromise(Scope.close(scope, Exit.void));
+      }
+      scope = await Effect.runPromise(Scope.make("sequential"));
+      await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+    };
 
     return {
       engine,
@@ -505,9 +655,13 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions,
       stateDir,
       drain,
+      restartReactor,
       runEffect,
       get titleRegenerationCompletionDispatchAttempts() {
         return titleRegenerationCompletionDispatchAttempts;
+      },
+      get recoveryCandidateCount() {
+        return recoveryCandidateBeforeStart === undefined ? 0 : 1;
       },
     };
   }
@@ -1907,6 +2061,269 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
     expect(harness.startSession.mock.calls.length).toBe(1);
     expect(harness.stopSession.mock.calls.length).toBe(0);
+  });
+
+  it("starts fresh once and prepends bounded history when provider resume is too large", async () => {
+    const recoveryCwd = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "provider-recovery-reference-"),
+    );
+    let startAttempt = 0;
+    const harness = await createHarness({
+      startSessionEffect: (session) => {
+        startAttempt += 1;
+        return startAttempt === 2
+          ? Effect.fail(
+              new ProviderAdapterResumeError({
+                provider: "codex",
+                method: "thread/resume",
+                reason: "payload_too_large",
+                detail: "Resume response exceeded the byte limit.",
+                maxBytes: 16 * 1024 * 1024,
+                observedBytes: 16 * 1024 * 1024 + 1,
+              }),
+            )
+          : Effect.succeed(session);
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-recovery-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        branch: "recovery-test",
+        worktreePath: recoveryCwd,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-recovery-first"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-recovery-first"),
+          role: "user",
+          text: "Preserve this original objective.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    harness.runtimeSessions.length = 0;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-recovery-second"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-recovery-second"),
+          role: "user",
+          text: "Continue from there.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls.length).toBe(3);
+    expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+    const recoveredTurn = harness.sendTurn.mock.calls[1]?.[0] as { input?: string } | undefined;
+    expect(recoveredTurn?.input).toContain("[BearT3 provider-session recovery context]");
+    expect(recoveredTurn?.input).toContain("Preserve this original objective.");
+    expect(recoveredTurn?.input).toContain("Continue from there.");
+    expect(recoveredTurn?.input).toContain("Supplemental bounded history manifest: .t3/");
+    expect(recoveredTurn?.input?.length).toBeLessThanOrEqual(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(recoveredTurn?.input?.match(/Continue from there\./g)).toHaveLength(1);
+    const manifestRelativePath = recoveredTurn?.input?.match(
+      /Supplemental bounded history manifest: ([^\n]+)/,
+    )?.[1];
+    expect(manifestRelativePath).toBeDefined();
+    const manifest = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(recoveryCwd, manifestRelativePath!), "utf8"),
+    );
+    expect(manifest.agentInputBoundary.seesNow).toContain("manifest path");
+    expect(manifest.messages).toHaveLength(1);
+    expect(manifest.messages[0].id).toBe("user-message-recovery-first");
+    await waitFor(async () => {
+      const snapshot = await harness.readModel();
+      return (
+        snapshot.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) => activity.kind === "provider.session.recovery.submitted",
+          ) === true
+      );
+    });
+    await harness.drain();
+    expect(harness.startSession.mock.calls.length).toBe(3);
+    expect(harness.sendTurn.mock.calls.length).toBe(2);
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.some((activity) => activity.kind === "provider.session.recovery.started"),
+    ).toBe(true);
+    expect(
+      thread?.activities.some(
+        (activity) => activity.kind === "provider.session.recovery.submitted",
+      ),
+    ).toBe(true);
+    NodeFS.rmSync(recoveryCwd, { recursive: true, force: true });
+  });
+
+  it("dispatches one bounded fresh candidate for an async provider resume failure", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const messageId = asMessageId("user-message-async-resume");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-async-resume-original"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "Continue this pending request once.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    const recovery = {
+      recoveryId: `recovery:${threadId}:${messageId}`,
+      sourceMessageId: messageId,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      reason: "session_missing" as const,
+      phase: "prepared" as const,
+      contextDigest: `context-v1:${threadId}:${messageId}`,
+      contextVersion: 1 as const,
+      startKey: `recovery:${threadId}:${messageId}:start`,
+      dispatchKey: `recovery:${threadId}:${messageId}:dispatch`,
+      preparedAt: now,
+      updatedAt: now,
+    };
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(recovery.startKey),
+        threadId,
+        recovery,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls).toHaveLength(2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+    const candidate = harness.sendTurn.mock.calls[1]?.[0] as { input: string };
+    expect(candidate.input.length).toBeLessThanOrEqual(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(candidate.input).toContain("[Current user request after provider-session recovery]");
+    expect(candidate.input.match(/Continue this pending request once\./g)).toHaveLength(1);
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(recovery.startKey),
+        threadId,
+        recovery,
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.startSession.mock.calls).toHaveLength(2);
+    expect(harness.sendTurn.mock.calls).toHaveLength(2);
+  });
+
+  it("does not resend a dispatch-committed recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "dispatch-committed" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+    expect(harness.recoveryCandidateCount).toBe(0);
+    await harness.restartReactor();
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+
+    const replacementId = "recovery:thread-1:replacement";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.provider-recovery.set",
+        commandId: CommandId.make(`${replacementId}:prepare`),
+        threadId: ThreadId.make("thread-1"),
+        recovery: {
+          recoveryId: replacementId,
+          sourceMessageId: asMessageId("recovery-before-start-message"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          reason: "payload_too_large",
+          phase: "prepared",
+          contextDigest: "context-v1:replacement",
+          contextVersion: 1,
+          startKey: `${replacementId}:start`,
+          dispatchKey: `${replacementId}:dispatch`,
+          preparedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const events = await harness.runEffect(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    expect(
+      events.some(
+        (event) =>
+          event.type === "thread.provider-recovery-set" &&
+          event.payload.recovery.recoveryId === replacementId &&
+          event.payload.recovery.phase === "prepared",
+      ),
+    ).toBe(true);
+  });
+
+  it("rolls back a dispatch-committed candidate when its projection is missing", async () => {
+    const harness = await createHarness({
+      recoveryBeforeStartPhase: "dispatch-committed",
+      omitRecoveryProjectionBeforeStart: true,
+    });
+
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+    expect(harness.recoveryCandidateCount).toBe(0);
+    await harness.restartReactor();
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+  });
+
+  it("dispatches one candidate-started recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "candidate-started" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(1);
+  });
+
+  it("starts and dispatches one prepared recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "prepared" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(1);
+  });
+
+  it("does not resend a turn-started recovery after restart", async () => {
+    const harness = await createHarness({ recoveryBeforeStartPhase: "turn-started" });
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
+    await harness.restartReactor();
+    expect(harness.sendTurn.mock.calls).toHaveLength(0);
   });
 
   it("restarts an existing Codex thread on a compatible requested instance", async () => {

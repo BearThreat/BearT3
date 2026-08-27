@@ -42,6 +42,9 @@ const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(Orchestration
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
 const decodeOrchestrationThread = Schema.decodeUnknownEffect(OrchestrationThread);
 const decodeOrchestrationThreadShell = Schema.decodeUnknownEffect(OrchestrationThreadShell);
+const encodeOrchestrationThreadShellJson = Schema.encodeEffect(
+  Schema.fromJsonString(OrchestrationThreadShell),
+);
 const encodeThreadCreatedPayload = Schema.encodeEffect(ThreadCreatedPayload);
 
 function getOptionValue(
@@ -53,7 +56,79 @@ function getOptionValue(
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
+const encodeOrchestrationEventJson = Schema.encodeEffect(Schema.fromJsonString(OrchestrationEvent));
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+
+it.effect("strips provider resume cursors from encoded recovery events", () =>
+  Effect.gen(function* () {
+    const opaqueCursor = "OPAQUE-CURSOR-MUST-STAY-SERVER-ONLY";
+    const decoded = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "event-1",
+      type: "thread.provider-recovery-set",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      commandId: "command-1",
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      payload: {
+        threadId: "thread-1",
+        recovery: {
+          recoveryId: "recovery-1",
+          sourceMessageId: "message-1",
+          providerInstanceId: "codex",
+          reason: "payload_too_large",
+          phase: "candidate-started",
+          canonicalResumeCursor: { opaque: opaqueCursor },
+          candidateResumeCursor: { opaque: opaqueCursor },
+          contextDigest: "context-v1",
+          contextVersion: 1,
+          startKey: "recovery-1:start",
+          dispatchKey: "recovery-1:dispatch",
+          preparedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    const wire = yield* encodeOrchestrationEventJson(decoded);
+    assert.ok(!wire.includes(opaqueCursor));
+    assert.ok(!wire.includes("candidateResumeCursor"));
+    if (decoded.type !== "thread.provider-recovery-set") {
+      return assert.fail("Expected a provider recovery event.");
+    }
+    assert.strictEqual(decoded.payload.recovery.phase, "candidate-started");
+    const shell = yield* decodeOrchestrationThreadShell({
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Recovery thread",
+      modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      session: null,
+      recovery: {
+        ...decoded.payload.recovery,
+        candidateResumeCursor: { opaque: opaqueCursor },
+      },
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    });
+    const shellWire = yield* encodeOrchestrationThreadShellJson(shell);
+    assert.ok(!shellWire.includes(opaqueCursor));
+    assert.ok(!shellWire.includes("candidateResumeCursor"));
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {
