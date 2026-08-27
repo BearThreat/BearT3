@@ -4,6 +4,17 @@ BearT3 is Barrett's public fork of [T3 Code](https://github.com/pingdotgg/t3code
 the upstream product while carrying a small set of reliability changes proven in a private,
 multi-device Tailscale deployment.
 
+## Local hybrid thread search
+
+Run the separate `thread-search-service` on the BearT3 host, then set
+`T3_THREAD_SEARCH_SIDECAR_URL=http://127.0.0.1:8793` on the BearT3 server. The sidecar provides exact,
+FTS5/BM25, and Ollama-backed semantic ranking through a versioned loopback HTTP contract. Its index
+is disposable and never reads BearT3's database directly.
+
+BearT3 sends at most 100 active thread summaries per query and waits no more than 900 ms. If the
+sidecar, Ollama, or contract is absent, slow, or invalid, BearT3 returns exact matches unchanged.
+BearT3 startup and clients do not depend on this service.
+
 ## Why the fork exists
 
 The deployment uses one coding-agent host with browsers connecting from Linux, Windows, and

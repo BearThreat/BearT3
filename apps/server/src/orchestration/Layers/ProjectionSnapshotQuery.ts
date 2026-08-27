@@ -61,6 +61,11 @@ import {
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
+  isThreadSearchSidecarEnabled,
+  mergeThreadSearchRankings,
+  searchThreadSidecar,
+} from "../ThreadSearchSidecar.ts";
+import {
   ProjectionSnapshotQuery,
   type ProjectionFullThreadDiffContext,
   type ProjectionSnapshotCounts,
@@ -133,6 +138,9 @@ const ProjectionThreadSearchRow = Schema.Struct({
   matchText: Schema.String,
   messageCreatedAt: Schema.NullOr(IsoDateTime),
 });
+const ProjectionThreadSearchCandidateRow = ProjectionThreadSearchRow.mapFields(
+  Struct.assign({ title: Schema.String }),
+);
 const WorkspaceRootLookupInput = Schema.Struct({
   workspaceRoot: Schema.String,
 });
@@ -848,6 +856,68 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           match_rank ASC,
           thread_updated_at DESC,
           thread_id ASC
+        LIMIT ${limit}
+      `,
+  });
+
+  const listThreadSearchCandidates = SqlSchema.findAll({
+    Request: Schema.Struct({ limit: Schema.Int }),
+    Result: ProjectionThreadSearchCandidateRow,
+    execute: ({ limit }) =>
+      sql`
+        WITH searchable_messages AS (
+          SELECT
+            messages.thread_id,
+            messages.role,
+            messages.text,
+            messages.created_at,
+            ROW_NUMBER() OVER (
+              PARTITION BY messages.thread_id
+              ORDER BY messages.created_at DESC, messages.message_id ASC
+            ) AS message_rank
+          FROM projection_thread_messages AS messages
+          WHERE messages.is_streaming = 0
+            AND (
+              messages.role = 'user'
+              OR (
+                messages.role = 'assistant'
+                AND messages.message_id IN (
+                  SELECT turns.assistant_message_id
+                  FROM projection_turns AS turns
+                  WHERE turns.assistant_message_id IS NOT NULL
+                )
+              )
+            )
+        ), thread_documents AS (
+          SELECT
+            thread_id,
+            GROUP_CONCAT(text, '\n') AS text,
+            MAX(CASE WHEN message_rank = 1 THEN role END) AS latest_role,
+            MAX(CASE WHEN message_rank = 1 THEN created_at END) AS latest_created_at
+          FROM searchable_messages
+          WHERE message_rank <= 4
+          GROUP BY thread_id
+        )
+        SELECT
+          threads.thread_id AS "threadId",
+          threads.project_id AS "projectId",
+          CASE thread_documents.latest_role
+            WHEN 'user' THEN 'user'
+            WHEN 'assistant' THEN 'assistant'
+            ELSE 'title'
+          END AS source,
+          COALESCE(thread_documents.text, threads.title) AS "matchText",
+          thread_documents.latest_created_at AS "messageCreatedAt",
+          threads.title
+        FROM projection_threads AS threads
+        INNER JOIN projection_projects AS projects
+          ON projects.project_id = threads.project_id
+        LEFT JOIN thread_documents
+          ON thread_documents.thread_id = threads.thread_id
+        WHERE threads.deleted_at IS NULL
+          AND threads.archived_at IS NULL
+          AND projects.deleted_at IS NULL
+        ORDER BY threads.updated_at DESC, threads.thread_id ASC
         LIMIT ${limit}
       `,
   });
@@ -2286,14 +2356,62 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       ),
     );
+    const exactMatches = rows.map((row) => ({
+      threadId: row.threadId,
+      projectId: row.projectId,
+      source: row.source,
+      snippet: buildSearchSnippet(row.matchText, input.query),
+      messageCreatedAt: row.messageCreatedAt,
+    }));
+    const limit = input.limit ?? 50;
+    if (!isThreadSearchSidecarEnabled()) return { matches: exactMatches };
+
+    const candidates = yield* listThreadSearchCandidates({ limit: 100 }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.searchThreads:sidecarCandidates",
+          "ProjectionSnapshotQuery.searchThreads:decodeSidecarCandidates",
+        ),
+      ),
+    );
+    const sidecarThreadIds = yield* Effect.promise(() =>
+      searchThreadSidecar({
+        query: input.query,
+        limit,
+        documents: candidates.map((candidate) => ({
+          id: candidate.threadId,
+          threadId: candidate.threadId,
+          projectId: candidate.projectId,
+          title: candidate.title.slice(0, 500),
+          text: candidate.matchText.slice(0, 12_000),
+        })),
+      }),
+    );
+    if (sidecarThreadIds === null) return { matches: exactMatches };
+
+    const candidatesByThreadId = new Map(
+      candidates.map((candidate) => [candidate.threadId, candidate] as const),
+    );
+    const sidecarMatches = sidecarThreadIds.flatMap((threadId) => {
+      const row = candidatesByThreadId.get(ThreadId.make(threadId));
+      return row === undefined
+        ? []
+        : [
+            {
+              threadId: row.threadId,
+              projectId: row.projectId,
+              source: row.source,
+              snippet: buildSearchSnippet(row.matchText, input.query),
+              messageCreatedAt: row.messageCreatedAt,
+            },
+          ];
+    });
     return {
-      matches: rows.map((row) => ({
-        threadId: row.threadId,
-        projectId: row.projectId,
-        source: row.source,
-        snippet: buildSearchSnippet(row.matchText, input.query),
-        messageCreatedAt: row.messageCreatedAt,
-      })),
+      matches: mergeThreadSearchRankings({
+        exact: exactMatches.map((match) => ({ key: match.threadId, item: match })),
+        sidecar: sidecarMatches.map((match) => ({ key: match.threadId, item: match })),
+        limit,
+      }),
     };
   });
 

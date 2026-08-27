@@ -15,7 +15,7 @@ export interface ThreadSortInput {
 
 export interface ConversationActivitySortInput {
   readonly createdAt: string;
-  readonly unsettledAt?: string | null;
+  readonly unsettledAt?: string | null | undefined;
   readonly latestUserMessageAt?: string | null;
   readonly latestTurn?: {
     readonly completedAt?: string | null;
