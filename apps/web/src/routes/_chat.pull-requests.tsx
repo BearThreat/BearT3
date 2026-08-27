@@ -77,7 +77,7 @@ import {
 import { PanelLayoutControls } from "../components/chat/PanelLayoutControls";
 import { Button } from "../components/ui/button";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../components/ui/menu";
-import { SidebarInset } from "../components/ui/sidebar";
+import { AppViewportInset } from "../components/AppViewportInset";
 import { useLiveRefresh } from "../hooks/useLiveRefresh";
 import {
   selectActiveRightPanelSurface,
@@ -1537,7 +1537,7 @@ function PullRequestsRouteView() {
   };
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <AppViewportInset>
       <div className="relative flex min-h-0 flex-1">
         {pullRequestsSupported ? openPanelControls : null}
         <PullRequestsColumn {...columnProps} />
@@ -1608,7 +1608,7 @@ function PullRequestsRouteView() {
           </RightPanelTabs>
         ) : null}
       </div>
-    </SidebarInset>
+    </AppViewportInset>
   );
 }
 

@@ -21,7 +21,7 @@ import {
 } from "@t3tools/shared/usageFormat";
 import { ScrollArea } from "../ui/scroll-area";
 import { Button } from "../ui/button";
-import { SidebarInset } from "../ui/sidebar";
+import { AppViewportInset } from "../AppViewportInset";
 import { WorkspaceBreadcrumb, WorkspaceBreadcrumbItem } from "../WorkspaceBreadcrumb";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "../../workspaceTitlebar";
 import { UsageChartLegend, UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
@@ -102,7 +102,7 @@ export function UsagePage() {
   };
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
+    <AppViewportInset className="isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         {!isElectron && (
           <header
@@ -436,7 +436,7 @@ export function UsagePage() {
           </div>
         </ScrollArea>
       </div>
-    </SidebarInset>
+    </AppViewportInset>
   );
 }
 

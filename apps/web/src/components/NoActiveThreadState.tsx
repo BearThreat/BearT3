@@ -1,12 +1,12 @@
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
-import { SidebarInset } from "./ui/sidebar";
+import { AppViewportInset } from "./AppViewportInset";
 import { isElectron } from "../env";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 export function NoActiveThreadState() {
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <AppViewportInset>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
         <header
           className={cn(
@@ -41,6 +41,6 @@ export function NoActiveThreadState() {
           </div>
         </Empty>
       </div>
-    </SidebarInset>
+    </AppViewportInset>
   );
 }

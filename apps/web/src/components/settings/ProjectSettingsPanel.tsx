@@ -95,7 +95,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { SidebarInset } from "../ui/sidebar";
+import { AppViewportInset } from "../AppViewportInset";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   WorkspaceBreadcrumb,
@@ -172,7 +172,7 @@ export function ProjectSettingsPage({ projectKey }: { projectKey: string }) {
   }, [navigateBackWithinApp]);
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
+    <AppViewportInset className="isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         {!isElectron && (
           <header
@@ -196,7 +196,7 @@ export function ProjectSettingsPage({ projectKey }: { projectKey: string }) {
         )}
         <ProjectSettingsPanel projectKey={projectKey} />
       </div>
-    </SidebarInset>
+    </AppViewportInset>
   );
 }
 

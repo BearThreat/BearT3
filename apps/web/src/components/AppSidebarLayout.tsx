@@ -17,6 +17,7 @@ import { primaryServerKeybindingsAtom } from "../state/server";
 import { useEnvironmentIdentificationMode, useLegacySidebarEnabled } from "../hooks/useSettings";
 import LegacyThreadSidebar from "./LegacySidebar";
 import ThreadSidebar from "./Sidebar";
+import { APP_SHELL_VIEWPORT_HEIGHT_CLASS } from "./AppViewportInset";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import {
@@ -209,7 +210,11 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   }, [navigate, pathname]);
 
   return (
-    <SidebarProvider className="h-dvh! min-h-0!" defaultOpen style={sidebarProviderStyle}>
+    <SidebarProvider
+      className={APP_SHELL_VIEWPORT_HEIGHT_CLASS}
+      defaultOpen
+      style={sidebarProviderStyle}
+    >
       <ProjectProjectionRetention />
       <Sidebar
         side="left"
