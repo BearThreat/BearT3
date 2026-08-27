@@ -310,12 +310,12 @@ it.effect("does not fail startup when the live provider session inventory cannot
 
 const makeRecoveryShell = (input?: {
   readonly latestUserMessageAt?: string;
-  readonly sessionStatus?: "running" | "error";
+  readonly sessionStatus?: "running" | "stopped" | "error";
   readonly lastError?: string | null;
   readonly archivedAt?: string | null;
   readonly hasPendingApprovals?: boolean;
   readonly hasPendingUserInput?: boolean;
-  readonly latestTurnState?: "running" | "completed";
+  readonly latestTurnState?: "running" | "interrupted" | "completed";
 }) => ({
   id: ThreadId.make("thread-recovery"),
   projectId: "project-1",
@@ -330,7 +330,10 @@ const makeRecoveryShell = (input?: {
     state: input?.latestTurnState ?? "running",
     requestedAt: updatedAt,
     startedAt: updatedAt,
-    completedAt: input?.latestTurnState === "completed" ? updatedAt : null,
+    completedAt:
+      input?.latestTurnState === "completed" || input?.latestTurnState === "interrupted"
+        ? updatedAt
+        : null,
     assistantMessageId: null,
   },
   createdAt: updatedAt,
@@ -508,6 +511,185 @@ it.effect.each([
   "live-provider",
 ] as const)("%s during grace suppresses recovery", (changeDuringGrace) =>
   recoveryHarness({ changeDuringGrace }).pipe(
+    Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
+  ),
+);
+
+type GracefulRecoveryChange = RecoveryGraceChange | "marker-cleared" | "marker-turn-changed";
+
+function gracefulRecoveryHarness(input?: {
+  readonly changeDuringGrace?: GracefulRecoveryChange;
+  readonly markerStoppedAt?: string;
+  readonly closeBeforeGrace?: boolean;
+}) {
+  const markerStoppedAt = input?.markerStoppedAt ?? updatedAt;
+  let shell = makeRecoveryShell({ sessionStatus: "stopped", latestTurnState: "interrupted" });
+  let policy: ThreadRecoveryPolicy | null = null;
+  let providerLive = false;
+  let marker: unknown = {
+    gracefulShutdownRecovery: {
+      turnId: "turn-interrupted",
+      stoppedAt: markerStoppedAt,
+    },
+  };
+  const accepted = new Map<string, OrchestrationCommand>();
+  const query = {
+    getShellSnapshot: () => Effect.succeed({ threads: [shell] } as never),
+    getCommandReadModel: () =>
+      Effect.succeed({ threads: [makeThread("thread-recovery", "stopped")] } as never),
+    getThreadShellById: () => Effect.succeed(Option.some(shell) as never),
+  } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+  const program = Effect.gen(function* () {
+    yield* TestClock.setTime(Date.parse("2026-08-20T12:00:01.000Z"));
+    const startupScope = yield* Scope.make();
+    yield* ServerRuntimeStartup.reconcileProviderSessions({
+      graceMs: 30_000,
+      gracefulShutdownMaxAgeMs: 5 * 60_000,
+      readRecoveryPolicy: () => policy,
+    }).pipe(Scope.provide(startupScope));
+    if (input?.closeBeforeGrace) {
+      yield* Scope.close(startupScope, Exit.void);
+      yield* TestClock.adjust("30 seconds");
+      return { accepted, marker };
+    }
+    const stopped = {
+      sessionStatus: "stopped" as const,
+      latestTurnState: "interrupted" as const,
+    };
+    switch (input?.changeDuringGrace) {
+      case "approval":
+        shell = makeRecoveryShell({ ...stopped, hasPendingApprovals: true });
+        break;
+      case "input":
+        shell = makeRecoveryShell({ ...stopped, hasPendingUserInput: true });
+        break;
+      case "archive":
+        shell = makeRecoveryShell({ ...stopped, archivedAt: updatedAt });
+        break;
+      case "pause":
+        policy = { mode: "paused" };
+        break;
+      case "finish":
+        policy = { mode: "finished" };
+        break;
+      case "completion":
+        shell = makeRecoveryShell({ sessionStatus: "stopped", latestTurnState: "completed" });
+        break;
+      case "later-user-message":
+        shell = makeRecoveryShell({
+          ...stopped,
+          latestUserMessageAt: "2026-08-20T12:00:02.000Z",
+        });
+        break;
+      case "live-provider":
+        providerLive = true;
+        break;
+      case "marker-cleared":
+        marker = { gracefulShutdownRecovery: null };
+        break;
+      case "marker-turn-changed":
+        marker = {
+          gracefulShutdownRecovery: { turnId: "turn-other", stoppedAt: markerStoppedAt },
+        };
+        break;
+    }
+    yield* TestClock.adjust("29999 millis");
+    assert.equal(accepted.size, 0);
+    yield* TestClock.adjust("1 millis");
+    yield* Effect.yieldNow;
+    yield* Scope.close(startupScope, Exit.void);
+    return { accepted, marker };
+  }).pipe(
+    Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, query),
+    Effect.provideService(ProviderService.ProviderService, {
+      ...makeProviderService(),
+      listSessions: () =>
+        Effect.succeed(
+          providerLive ? ([{ threadId: ThreadId.make("thread-recovery") }] as never) : [],
+        ),
+    }),
+    Effect.provideService(ProviderSessionDirectory.ProviderSessionDirectory, {
+      getBinding: () =>
+        Effect.succeed(
+          Option.some({
+            threadId: ThreadId.make("thread-recovery"),
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId,
+            status: "stopped",
+            runtimePayload: marker,
+          }),
+        ),
+      upsert: (binding: ProviderSessionDirectory.ProviderRuntimeBinding) =>
+        Effect.sync(() => {
+          const payload = binding.runtimePayload;
+          if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+            const nextMarker = (payload as { readonly gracefulShutdownRecovery?: unknown })
+              .gracefulShutdownRecovery;
+            if (nextMarker !== undefined) marker = { gracefulShutdownRecovery: nextMarker };
+          }
+        }),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.die("unused"),
+    } as unknown as ProviderSessionDirectory.ProviderSessionDirectory["Service"]),
+    Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+      readEvents: () => Stream.empty,
+      dispatch: (command) =>
+        Effect.sync(() => {
+          if (command.type === "thread.turn.start" && !accepted.has(command.commandId)) {
+            accepted.set(command.commandId, command);
+          }
+          return { sequence: accepted.size };
+        }),
+      streamDomainEvents: Stream.empty,
+      latestSequence: Effect.succeed(0),
+    }),
+    Effect.provide(NodeServices.layer),
+  );
+  return program;
+}
+
+it.effect("recovers one exact turn from a recent graceful restart", () =>
+  gracefulRecoveryHarness().pipe(
+    Effect.tap(({ accepted, marker }) =>
+      Effect.sync(() => {
+        assert.equal(accepted.size, 1);
+        const command = [...accepted.values()][0];
+        assert.equal(command?.type, "thread.turn.start");
+        if (command?.type === "thread.turn.start") {
+          assert.equal(command.commandId, "thread-recovery:thread-recovery:turn-interrupted");
+        }
+        assert.deepStrictEqual(marker, { gracefulShutdownRecovery: null });
+      }),
+    ),
+  ),
+);
+
+it.effect.each([
+  "approval",
+  "input",
+  "archive",
+  "pause",
+  "finish",
+  "completion",
+  "later-user-message",
+  "live-provider",
+  "marker-cleared",
+  "marker-turn-changed",
+] as const)("%s during graceful restart grace suppresses recovery", (changeDuringGrace) =>
+  gracefulRecoveryHarness({ changeDuringGrace }).pipe(
+    Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
+  ),
+);
+
+it.effect("does not recover a stale graceful shutdown marker", () =>
+  gracefulRecoveryHarness({ markerStoppedAt: "2026-08-20T11:00:00.000Z" }).pipe(
+    Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
+  ),
+);
+
+it.effect("a closed startup scope cannot dispatch recovery across a process boundary", () =>
+  gracefulRecoveryHarness({ closeBeforeGrace: true }).pipe(
     Effect.tap(({ accepted }) => Effect.sync(() => assert.equal(accepted.size, 0))),
   ),
 );

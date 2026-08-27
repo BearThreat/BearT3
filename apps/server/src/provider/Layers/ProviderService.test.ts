@@ -372,6 +372,126 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   }),
 );
 
+it.effect("ProviderService shutdown persists only the exact active-turn recovery marker", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const persistenceLayer = Layer.mergeAll(directoryLayer, runtimeRepositoryLayer);
+    const persistenceScope = yield* Scope.make();
+    const persistenceServices = yield* Layer.build(persistenceLayer).pipe(
+      Scope.provide(persistenceScope),
+    );
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory.pipe(
+      Effect.provide(persistenceServices),
+    );
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+      Layer.provide(Layer.succeed(ProviderSessionDirectory.ProviderSessionDirectory, directory)),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(serverConfigTestLayer),
+      Layer.provideMerge(AnalyticsService.layerTest),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+    );
+    const providerScope = yield* Scope.make();
+    const providerServices = yield* Layer.build(providerLayer).pipe(Scope.provide(providerScope));
+    const provider = yield* ProviderService.ProviderService.pipe(Effect.provide(providerServices));
+    const activeThreadId = asThreadId("thread-clean-restart-active");
+    const interruptedTurnId = asTurnId("turn-clean-restart-active");
+    const manualThreadId = asThreadId("thread-clean-restart-manual-race");
+    const manualTurnId = asTurnId("turn-clean-restart-manual-race");
+    const staleThreadId = asThreadId("thread-clean-restart-stale");
+
+    yield* provider.startSession(activeThreadId, {
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      threadId: activeThreadId,
+      runtimeMode: "full-access",
+    });
+    codex.updateSession(activeThreadId, (session) => ({
+      ...session,
+      status: "running",
+      activeTurnId: interruptedTurnId,
+    }));
+    yield* provider.startSession(manualThreadId, {
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      threadId: manualThreadId,
+      runtimeMode: "full-access",
+    });
+    codex.updateSession(manualThreadId, (session) => ({
+      ...session,
+      status: "running",
+      activeTurnId: manualTurnId,
+    }));
+    yield* directory.upsert({
+      threadId: manualThreadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      status: "running",
+      runtimePayload: { activeTurnId: manualTurnId },
+    });
+    yield* provider.interruptTurn({ threadId: manualThreadId });
+    yield* directory.upsert({
+      threadId: staleThreadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      status: "stopped",
+      runtimePayload: {
+        gracefulShutdownRecovery: {
+          turnId: "turn-manually-interrupted",
+          stoppedAt: "2026-08-20T10:00:00.000Z",
+        },
+      },
+    });
+
+    yield* Scope.close(providerScope, Exit.void);
+
+    const activeBinding = yield* directory.getBinding(activeThreadId);
+    assert.isTrue(Option.isSome(activeBinding));
+    if (Option.isSome(activeBinding)) {
+      const payload = activeBinding.value.runtimePayload as {
+        readonly activeTurnId?: unknown;
+        readonly gracefulShutdownRecovery?: {
+          readonly turnId?: unknown;
+          readonly stoppedAt?: unknown;
+        } | null;
+      };
+      assert.equal(payload.activeTurnId, null);
+      assert.equal(payload.gracefulShutdownRecovery?.turnId, interruptedTurnId);
+      assert.equal(typeof payload.gracefulShutdownRecovery?.stoppedAt, "string");
+    }
+
+    const staleBinding = yield* directory.getBinding(staleThreadId);
+    assert.isTrue(Option.isSome(staleBinding));
+    if (Option.isSome(staleBinding)) {
+      const payload = staleBinding.value.runtimePayload as {
+        readonly gracefulShutdownRecovery?: unknown;
+      };
+      assert.equal(payload.gracefulShutdownRecovery, null);
+    }
+    const manualBinding = yield* directory.getBinding(manualThreadId);
+    assert.isTrue(Option.isSome(manualBinding));
+    if (Option.isSome(manualBinding)) {
+      const payload = manualBinding.value.runtimePayload as {
+        readonly gracefulShutdownRecovery?: unknown;
+        readonly manualInterruptTurnId?: unknown;
+      };
+      assert.equal(payload.manualInterruptTurnId, manualTurnId);
+      assert.equal(payload.gracefulShutdownRecovery, null);
+    }
+    yield* Scope.close(persistenceScope, Exit.void);
+  }),
+);
+
 it.effect("ProviderServiceLive rejects new sessions for disabled providers", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();

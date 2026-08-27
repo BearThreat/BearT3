@@ -2,8 +2,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   automaticRecoveryDelayMs,
+  descriptorFromGracefulShutdown,
   descriptorFromReconciledOrphan,
   interruptedTurnForAutomaticRecovery,
+  isEligibleAfterGracefulShutdown,
   isEligibleAfterOrphanReconciliation,
   isRecoveryMessageId,
   recoveryCommandKey,
@@ -82,6 +84,74 @@ describe("ThreadRecoverySupervisor", () => {
     expect(
       descriptorFromReconciledOrphan("thread-1", reconciledThread as never, orphanError),
     ).toEqual(descriptor);
+  });
+
+  it("accepts a fresh exact graceful-shutdown marker", () => {
+    const stoppedAt = "2026-08-17T19:00:10.000Z";
+    const stoppedThread = {
+      ...runningThread,
+      latestTurn: {
+        ...runningThread.latestTurn,
+        state: "interrupted",
+        completedAt: stoppedAt,
+      },
+      session: {
+        status: "stopped",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: stoppedAt,
+      },
+    } as const;
+    const graceful = descriptorFromGracefulShutdown(
+      "thread-1",
+      stoppedThread as never,
+      { gracefulShutdownRecovery: { turnId: "turn-1", stoppedAt } },
+      "2026-08-17T19:01:00.000Z",
+    );
+    expect(graceful).toEqual({
+      ...descriptor,
+      source: "graceful-shutdown",
+      gracefulShutdownStoppedAt: stoppedAt,
+    });
+    expect(isEligibleAfterGracefulShutdown(stoppedThread as never, graceful!)).toBe(true);
+  });
+
+  it.each([
+    { name: "missing marker", payload: {}, observedAt: "2026-08-17T19:01:00.000Z" },
+    {
+      name: "manual interruption marker cleared",
+      payload: { gracefulShutdownRecovery: null },
+      observedAt: "2026-08-17T19:01:00.000Z",
+    },
+    {
+      name: "different turn",
+      payload: {
+        gracefulShutdownRecovery: {
+          turnId: "turn-old",
+          stoppedAt: "2026-08-17T19:00:10.000Z",
+        },
+      },
+      observedAt: "2026-08-17T19:01:00.000Z",
+    },
+    {
+      name: "stale restart",
+      payload: {
+        gracefulShutdownRecovery: {
+          turnId: "turn-1",
+          stoppedAt: "2026-08-17T18:00:00.000Z",
+        },
+      },
+      observedAt: "2026-08-17T19:01:00.000Z",
+    },
+  ])("rejects $name", ({ payload, observedAt }) => {
+    const stoppedThread = {
+      ...runningThread,
+      latestTurn: { ...runningThread.latestTurn, state: "interrupted" },
+      session: { status: "stopped", activeTurnId: null, lastError: null },
+    } as const;
+    expect(
+      descriptorFromGracefulShutdown("thread-1", stoppedThread as never, payload, observedAt),
+    ).toBeNull();
   });
 
   it("suppresses paused and finished policies", () => {
