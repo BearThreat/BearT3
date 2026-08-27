@@ -2802,3 +2802,112 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+const projectMoveEngineLayer = it.layer(
+  OrchestrationEngineLive.pipe(
+    Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provide(ThreadPlanProgress.layer),
+    Layer.provide(OrchestrationProjectionPipelineLive),
+    Layer.provide(OrchestrationEventStoreLive),
+    Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+    Layer.provide(RepositoryIdentityResolver.layer),
+    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), {
+        prefix: "t3-projection-pipeline-project-move-",
+      }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+projectMoveEngineLayer("thread project reassignment projection", (it) => {
+  it.effect("moves projected threads when thread.meta.update changes projectId", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const createdAt = "2026-01-01T00:00:00.000Z";
+
+      for (const projectId of ["project-source", "project-destination"] as const) {
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make(`cmd-${projectId}`),
+          projectId: ProjectId.make(projectId),
+          title: projectId,
+          workspaceRoot: `/tmp/${projectId}`,
+          defaultModelSelection: null,
+          createdAt,
+        });
+      }
+
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-project-move-create"),
+        threadId: ThreadId.make("thread-project-move"),
+        projectId: ProjectId.make("project-source"),
+        title: "Move me",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      });
+
+      const unsettledAt = "2026-01-01T00:01:00.000Z";
+      yield* sql`
+        UPDATE projection_threads
+        SET unsettled_at = ${unsettledAt}
+        WHERE thread_id = 'thread-project-move'
+      `;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          pending_message_id,
+          state,
+          requested_at,
+          checkpoint_files_json
+        ) VALUES (
+          'thread-project-move',
+          'server:thread-recovery:thread-project-move:turn-interrupted',
+          'running',
+          ${unsettledAt},
+          '[]'
+        )
+      `;
+
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-project-move-update"),
+        threadId: ThreadId.make("thread-project-move"),
+        projectId: ProjectId.make("project-destination"),
+      });
+
+      const rows = yield* sql<{
+        readonly projectId: string;
+        readonly unsettledAt: string | null;
+        readonly recoveryMessageId: string | null;
+      }>`
+        SELECT
+          threads.project_id AS "projectId",
+          threads.unsettled_at AS "unsettledAt",
+          turns.pending_message_id AS "recoveryMessageId"
+        FROM projection_threads AS threads
+        LEFT JOIN projection_turns AS turns
+          ON turns.thread_id = threads.thread_id
+        WHERE threads.thread_id = 'thread-project-move'
+      `;
+      assert.deepEqual(rows, [
+        {
+          projectId: "project-destination",
+          unsettledAt,
+          recoveryMessageId: "server:thread-recovery:thread-project-move:turn-interrupted",
+        },
+      ]);
+    }),
+  );
+});
