@@ -11,8 +11,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
 import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
+import { AppViewportInset } from "../components/AppViewportInset";
 import { Button } from "../components/ui/button";
-import { SidebarInset } from "../components/ui/sidebar";
 import { isElectron } from "../env";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
@@ -70,7 +70,7 @@ function SettingsContentLayout() {
   }, [navigateBackWithinApp]);
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
+    <AppViewportInset className="isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         {!isElectron && (
           <header
@@ -112,7 +112,7 @@ function SettingsContentLayout() {
           <Outlet />
         </div>
       </div>
-    </SidebarInset>
+    </AppViewportInset>
   );
 }
 

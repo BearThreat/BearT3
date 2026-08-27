@@ -2,11 +2,11 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import ChatView from "../components/ChatView";
+import { AppViewportInset } from "../components/AppViewportInset";
 import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteRef, resolveThreadRouteRenderState } from "../threadRoutes";
 import { resolveThreadSyncPhase } from "../threadSync";
-import { SidebarInset } from "~/components/ui/sidebar";
 import {
   useEnvironmentThreadRefs,
   useThreadDetail,
@@ -79,7 +79,7 @@ function ChatThreadRouteView() {
   }
 
   return (
-    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
+    <AppViewportInset>
       {renderState === "ready" || (renderState === "loading" && serverThreadShell !== null) ? (
         <ChatView
           environmentId={threadRef.environmentId}
@@ -88,7 +88,7 @@ function ChatThreadRouteView() {
           threadSyncPhase={threadSyncPhase}
         />
       ) : null}
-    </SidebarInset>
+    </AppViewportInset>
   );
 }
 
