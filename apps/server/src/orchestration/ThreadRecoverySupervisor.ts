@@ -3,6 +3,12 @@ import type { OrchestrationThreadShell } from "@t3tools/contracts";
 export const THREAD_RECOVERY_PROMPT = `System recovery: the previous agent turn was interrupted by a BearT3 server restart. Resume the user's existing objective autonomously. First inspect the conversation, current workspace, completed artifacts, running or completed subagents, and provider state. Reconstruct a remaining-work checklist and continue from the last verified state. Do not blindly repeat tool calls or any external, destructive, paid, message-sending, publishing, deployment, or credential-changing action; verify whether it already happened before retrying it. Preserve completed work, report a concrete blocker only when safe continuation is impossible, and otherwise continue until the original objective is genuinely handled.`;
 
 export const DEFAULT_RECOVERY_GRACE_MS = 30_000;
+export const DEFAULT_GRACEFUL_SHUTDOWN_RECOVERY_MAX_AGE_MS = 5 * 60_000;
+
+export interface GracefulShutdownRecoveryMarker {
+  readonly turnId: string;
+  readonly stoppedAt: string;
+}
 
 export type ThreadRecoveryPolicy =
   | {
@@ -27,6 +33,30 @@ export interface ThreadRecoveryDescriptor {
   readonly threadId: string;
   readonly interruptedTurnId: string;
   readonly latestUserMessageAt: string | null;
+  readonly source?: "orphan" | "graceful-shutdown";
+  readonly gracefulShutdownStoppedAt?: string;
+}
+
+function gracefulShutdownRecoveryMarker(
+  runtimePayload: unknown,
+): GracefulShutdownRecoveryMarker | null {
+  if (
+    runtimePayload === null ||
+    typeof runtimePayload !== "object" ||
+    Array.isArray(runtimePayload)
+  ) {
+    return null;
+  }
+  const marker = (runtimePayload as { readonly gracefulShutdownRecovery?: unknown })
+    .gracefulShutdownRecovery;
+  if (marker === null || typeof marker !== "object" || Array.isArray(marker)) return null;
+  const { turnId, stoppedAt } = marker as {
+    readonly turnId?: unknown;
+    readonly stoppedAt?: unknown;
+  };
+  return typeof turnId === "string" && turnId.length > 0 && typeof stoppedAt === "string"
+    ? { turnId, stoppedAt }
+    : null;
 }
 
 export function automaticRecoveryDelayMs(
@@ -79,6 +109,81 @@ export function descriptorFromReconciledOrphan(
     latestUserMessageAt: thread.latestUserMessageAt,
   } satisfies ThreadRecoveryDescriptor;
   return isEligibleAfterOrphanReconciliation(thread, descriptor, orphanError) ? descriptor : null;
+}
+
+export function descriptorFromGracefulShutdown(
+  threadId: string,
+  thread: RecoveryThread,
+  runtimePayload: unknown,
+  observedAt: string,
+  maxAgeMs = DEFAULT_GRACEFUL_SHUTDOWN_RECOVERY_MAX_AGE_MS,
+): ThreadRecoveryDescriptor | null {
+  const marker = gracefulShutdownRecoveryMarker(runtimePayload);
+  if (marker === null) return null;
+  const stoppedAtMs = Date.parse(marker.stoppedAt);
+  const observedAtMs = Date.parse(observedAt);
+  const ageMs = observedAtMs - stoppedAtMs;
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > Math.max(0, maxAgeMs)) return null;
+  if (
+    thread.archivedAt !== null ||
+    thread.hasPendingApprovals ||
+    thread.hasPendingUserInput ||
+    thread.recovery != null ||
+    thread.latestTurn?.turnId !== marker.turnId ||
+    thread.latestTurn.state !== "interrupted" ||
+    thread.session?.status !== "stopped" ||
+    thread.session.activeTurnId !== null
+  ) {
+    return null;
+  }
+  return {
+    threadId,
+    interruptedTurnId: marker.turnId,
+    latestUserMessageAt: thread.latestUserMessageAt,
+    source: "graceful-shutdown",
+    gracefulShutdownStoppedAt: marker.stoppedAt,
+  };
+}
+
+export function matchesGracefulShutdownRecoveryMarker(
+  runtimePayload: unknown,
+  descriptor: ThreadRecoveryDescriptor,
+): boolean {
+  if (descriptor.source !== "graceful-shutdown") return true;
+  const marker = gracefulShutdownRecoveryMarker(runtimePayload);
+  return (
+    marker !== null &&
+    marker.turnId === descriptor.interruptedTurnId &&
+    marker.stoppedAt === descriptor.gracefulShutdownStoppedAt
+  );
+}
+
+export function isEligibleAfterGracefulShutdown(
+  thread: RecoveryThread,
+  descriptor: ThreadRecoveryDescriptor,
+): boolean {
+  return (
+    descriptor.source === "graceful-shutdown" &&
+    thread.archivedAt === null &&
+    !thread.hasPendingApprovals &&
+    !thread.hasPendingUserInput &&
+    thread.recovery == null &&
+    thread.latestUserMessageAt === descriptor.latestUserMessageAt &&
+    thread.latestTurn?.turnId === descriptor.interruptedTurnId &&
+    thread.latestTurn.state === "interrupted" &&
+    thread.session?.status === "stopped" &&
+    thread.session.activeTurnId === null
+  );
+}
+
+export function isEligibleAfterRecoveryGrace(
+  thread: RecoveryThread,
+  descriptor: ThreadRecoveryDescriptor,
+  orphanError: string,
+): boolean {
+  return descriptor.source === "graceful-shutdown"
+    ? isEligibleAfterGracefulShutdown(thread, descriptor)
+    : isEligibleAfterOrphanReconciliation(thread, descriptor, orphanError);
 }
 
 export function recoveryCommandKey(threadId: string, interruptedTurnId: string): string {

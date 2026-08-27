@@ -23,6 +23,7 @@ import {
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type TurnId,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
@@ -162,6 +163,18 @@ function readPersistedCwd(
   if (typeof rawCwd !== "string") return undefined;
   const trimmed = rawCwd.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readPersistedTurnId(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+  key: "activeTurnId" | "manualInterruptTurnId",
+): string | null {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return null;
+  }
+  const payload = runtimePayload as Record<string, unknown>;
+  const raw = key in payload ? payload[key] : undefined;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
 
 const dieOnMissingBindingInstanceId = (
@@ -859,6 +872,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           activeTurnId: turn.turnId,
           lastRuntimeEvent: "provider.sendTurn",
           lastRuntimeEventAt: yield* nowIso,
+          manualInterruptTurnId: null,
         },
       });
       yield* analytics.record("provider.turn.sent", {
@@ -910,6 +924,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.thread_id": input.threadId,
           "provider.turn_id": input.turnId,
         });
+        const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+        const activeTurnId = readPersistedTurnId(binding?.runtimePayload, "activeTurnId");
+        if (binding !== undefined && activeTurnId !== null) {
+          yield* directory.upsert({
+            ...binding,
+            runtimePayload: {
+              manualInterruptTurnId: activeTurnId,
+              manualInterruptRequestedAt: yield* nowIso,
+            },
+          });
+        }
         yield* routed.adapter.interruptTurn(routed.threadId, input.turnId);
         yield* analytics.record("provider.turn.interrupted", {
           provider: routed.adapter.provider,
@@ -1193,14 +1218,42 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ),
       ),
     ).pipe(Effect.map((sessionsByAdapter) => sessionsByAdapter.flatMap((sessions) => sessions)));
-    yield* Effect.forEach(activeSessions, (session) =>
-      Effect.flatMap(nowIso, (lastRuntimeEventAt) =>
-        upsertSessionBinding(session, session.threadId, {
-          lastRuntimeEvent: "provider.stopAll",
-          lastRuntimeEventAt,
-        }),
-      ),
-    ).pipe(Effect.asVoid);
+    const stoppedAt = yield* nowIso;
+    const recoveryTurns = new Map<ThreadId, TurnId>();
+    for (const session of activeSessions) {
+      if (session.activeTurnId === undefined || session.activeTurnId === null) continue;
+      const binding = Option.getOrUndefined(yield* directory.getBinding(session.threadId));
+      const manuallyInterruptedTurnId = readPersistedTurnId(
+        binding?.runtimePayload,
+        "manualInterruptTurnId",
+      );
+      if (manuallyInterruptedTurnId !== session.activeTurnId) {
+        recoveryTurns.set(session.threadId, session.activeTurnId);
+      }
+    }
+    yield* Effect.forEach(activeSessions, (session) => {
+      const recoveryTurnId = recoveryTurns.get(session.threadId);
+      return upsertSessionBinding(session, session.threadId, {
+        lastRuntimeEvent: "provider.stopAll",
+        lastRuntimeEventAt: stoppedAt,
+      }).pipe(
+        Effect.andThen(
+          recoveryTurnId === undefined
+            ? Effect.void
+            : directory.upsert({
+                threadId: session.threadId,
+                provider: session.provider,
+                providerInstanceId: session.providerInstanceId,
+                runtimePayload: {
+                  gracefulShutdownRecovery: {
+                    turnId: recoveryTurnId,
+                    stoppedAt,
+                  },
+                },
+              }),
+        ),
+      );
+    }).pipe(Effect.asVoid);
     yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();
@@ -1211,6 +1264,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "ProviderService.stopAll",
           binding,
         );
+        const recoveryTurnId = recoveryTurns.get(binding.threadId);
         return yield* directory.upsert({
           threadId: binding.threadId,
           provider: binding.provider,
@@ -1219,7 +1273,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           runtimePayload: {
             activeTurnId: null,
             lastRuntimeEvent: "provider.stopAll",
-            lastRuntimeEventAt: yield* nowIso,
+            lastRuntimeEventAt: stoppedAt,
+            gracefulShutdownRecovery:
+              recoveryTurnId === undefined
+                ? null
+                : {
+                    turnId: recoveryTurnId,
+                    stoppedAt,
+                  },
           },
         });
       }),

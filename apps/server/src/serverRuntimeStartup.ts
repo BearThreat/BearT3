@@ -43,9 +43,11 @@ import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReape
 import { forkParked } from "./serverActivation.ts";
 import {
   automaticRecoveryDelayMs,
+  descriptorFromGracefulShutdown,
   descriptorFromReconciledOrphan,
   interruptedTurnForAutomaticRecovery,
-  isEligibleAfterOrphanReconciliation,
+  isEligibleAfterRecoveryGrace,
+  matchesGracefulShutdownRecoveryMarker,
   recoveryCommandKey,
   recoveryMessageId,
   THREAD_RECOVERY_PROMPT,
@@ -366,6 +368,7 @@ export const readThreadRecoveryPolicy = Effect.fn("readThreadRecoveryPolicy")(fu
 
 interface ProviderSessionReconciliationOptions {
   readonly graceMs?: number;
+  readonly gracefulShutdownMaxAgeMs?: number;
   readonly readRecoveryPolicy?: (threadId: string) => ThreadRecoveryPolicy | null;
 }
 
@@ -407,6 +410,7 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
     );
     const orphanedThreadIds = new Set(orphanedThreads.map((thread) => thread.id));
     const recoveryDescriptors: ThreadRecoveryDescriptor[] = [];
+    const observedAt = DateTime.formatIso(yield* DateTime.now);
     for (const thread of recoveryThreads) {
       const policy = yield* readTrustedRecoveryPolicy(thread.id);
       if (Option.isNone(policy)) continue;
@@ -429,7 +433,29 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
         thread as never,
         ORPHANED_PROVIDER_SESSION_ERROR,
       );
-      if (descriptor !== null) recoveryDescriptors.push(descriptor);
+      if (descriptor !== null) {
+        recoveryDescriptors.push(descriptor);
+        continue;
+      }
+      const binding = yield* directory.getBinding(ThreadId.make(thread.id)).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to inspect graceful shutdown recovery marker", {
+                threadId: thread.id,
+                cause,
+              }).pipe(Effect.as(Option.none())),
+        ),
+      );
+      if (Option.isNone(binding)) continue;
+      const gracefulDescriptor = descriptorFromGracefulShutdown(
+        thread.id,
+        thread as never,
+        binding.value.runtimePayload,
+        observedAt,
+        options.gracefulShutdownMaxAgeMs,
+      );
+      if (gracefulDescriptor !== null) recoveryDescriptors.push(gracefulDescriptor);
     }
 
     for (const thread of orphanedThreads) {
@@ -501,12 +527,28 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
                 (session) => session.threadId === descriptor.threadId,
               );
               if (providerBecameLive) return;
+              let gracefulBinding: ProviderSessionDirectory.ProviderRuntimeBinding | null = null;
+              if (descriptor.source === "graceful-shutdown") {
+                const currentBinding = yield* directory
+                  .getBinding(ThreadId.make(descriptor.threadId))
+                  .pipe(Effect.catchCause(() => Effect.succeed(Option.none())));
+                if (
+                  Option.isNone(currentBinding) ||
+                  !matchesGracefulShutdownRecoveryMarker(
+                    currentBinding.value.runtimePayload,
+                    descriptor,
+                  )
+                ) {
+                  return;
+                }
+                gracefulBinding = currentBinding.value;
+              }
               const thread = yield* query
                 .getThreadShellById(ThreadId.make(descriptor.threadId))
                 .pipe(Effect.map(Option.getOrUndefined));
               if (
                 thread === undefined ||
-                !isEligibleAfterOrphanReconciliation(
+                !isEligibleAfterRecoveryGrace(
                   thread as never,
                   descriptor,
                   ORPHANED_PROVIDER_SESSION_ERROR,
@@ -533,6 +575,23 @@ const reconcileProviderSessionsEffect = Effect.fn("reconcileProviderSessions")(
                 interactionMode: thread.interactionMode,
                 createdAt,
               });
+              if (gracefulBinding !== null) {
+                yield* directory
+                  .upsert({
+                    ...gracefulBinding,
+                    runtimePayload: { gracefulShutdownRecovery: null },
+                  })
+                  .pipe(
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterrupts(cause)
+                        ? Effect.failCause(cause)
+                        : Effect.logWarning(
+                            "failed to clear consumed graceful shutdown recovery marker",
+                            { threadId: descriptor.threadId, cause },
+                          ),
+                    ),
+                  );
+              }
             }),
           ),
           Effect.catchCause((cause) =>
