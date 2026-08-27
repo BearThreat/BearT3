@@ -18,8 +18,56 @@ export interface ThreadSearchRankingEntry<T> {
   readonly item: T;
 }
 
+function configuredSidecarUrl(value: string | undefined): URL | null {
+  const configured = value?.trim();
+  if (!configured) return null;
+
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (url.username !== "" || url.password !== "") return null;
+
+  // Validate the authority before URL normalization. WHATWG URL parsing
+  // canonicalizes integer, octal, hexadecimal, and short IPv4 forms to a
+  // dotted loopback address, which would otherwise bypass a hostname check.
+  const authorityMatch = configured.match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i);
+  if (authorityMatch === null) return null;
+  const authority = authorityMatch[1]!;
+  let rawHostname: string;
+  if (authority.startsWith("[")) {
+    const closingBracket = authority.indexOf("]");
+    if (closingBracket < 0) return null;
+    rawHostname = authority.slice(0, closingBracket + 1);
+    const suffix = authority.slice(closingBracket + 1);
+    if (suffix !== "" && !/^:\d+$/.test(suffix)) return null;
+  } else {
+    const colon = authority.lastIndexOf(":");
+    rawHostname = colon < 0 ? authority : authority.slice(0, colon);
+    const suffix = colon < 0 ? "" : authority.slice(colon);
+    if (suffix !== "" && !/^:\d+$/.test(suffix)) return null;
+  }
+
+  if (rawHostname.toLowerCase() === "localhost") return url;
+  if (rawHostname === "[::1]") return url;
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(rawHostname)) return null;
+  const octets = rawHostname.split(".");
+  if (
+    octets.some(
+      (octet) => (octet.length > 1 && octet.startsWith("0")) || Number.parseInt(octet, 10) > 255,
+    ) ||
+    Number.parseInt(octets[0]!, 10) !== 127
+  ) {
+    return null;
+  }
+  return url;
+}
+
 export function isThreadSearchSidecarEnabled(): boolean {
-  return (process.env.T3_THREAD_SEARCH_SIDECAR_URL?.trim().length ?? 0) > 0;
+  return configuredSidecarUrl(process.env.T3_THREAD_SEARCH_SIDECAR_URL) !== null;
 }
 
 function isSearchResponse(value: unknown): value is ThreadSearchSidecarResponse {
@@ -45,23 +93,24 @@ export async function searchThreadSidecar(input: {
   readonly fetchFn?: typeof fetch;
   readonly timeoutMs?: number;
 }): Promise<ReadonlyArray<string> | null> {
-  const configuredUrl = input.baseUrl ?? process.env.T3_THREAD_SEARCH_SIDECAR_URL;
-  if (configuredUrl === undefined || configuredUrl.trim() === "") return null;
+  const configuredUrl = configuredSidecarUrl(
+    input.baseUrl ?? process.env.T3_THREAD_SEARCH_SIDECAR_URL,
+  );
+  if (configuredUrl === null) return null;
+  const endpoint = new URL("v1/search", `${configuredUrl.href.replace(/\/$/, "")}/`);
 
   try {
-    const response = await (input.fetchFn ?? fetch)(
-      `${configuredUrl.trim().replace(/\/$/, "")}/v1/search`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          query: input.query,
-          limit: input.limit,
-          documents: input.documents,
-        }),
-        signal: AbortSignal.timeout(input.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-      },
-    );
+    const response = await (input.fetchFn ?? fetch)(endpoint, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: input.query,
+        limit: input.limit,
+        documents: input.documents,
+      }),
+      signal: AbortSignal.timeout(input.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    });
     if (!response.ok) return null;
     const body: unknown = await response.json();
     if (!isSearchResponse(body)) return null;

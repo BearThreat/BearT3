@@ -1586,8 +1586,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
-  it.effect("searches active user messages and canonical assistant outputs", () =>
-    Effect.gen(function* () {
+  it.effect("searches active user messages and canonical assistant outputs", () => {
+    const configuredSidecar = process.env.T3_THREAD_SEARCH_SIDECAR_URL;
+    delete process.env.T3_THREAD_SEARCH_SIDECAR_URL;
+    return Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
 
@@ -1848,8 +1850,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         (yield* snapshotQuery.searchThreads({ query: "user needle" })).matches,
         [],
       );
-    }),
-  );
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (configuredSidecar === undefined) {
+            delete process.env.T3_THREAD_SEARCH_SIDECAR_URL;
+          } else {
+            process.env.T3_THREAD_SEARCH_SIDECAR_URL = configuredSidecar;
+          }
+        }),
+      ),
+    );
+  });
 });
 
 it.effect(

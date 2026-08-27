@@ -48,8 +48,73 @@ it("sends the bounded document payload unchanged", async () => {
   expect(body).toEqual({ query: "token", limit: 10, documents });
 });
 
+it.each([
+  "http://127.0.0.1:8793",
+  "https://127.255.255.254",
+  "http://localhost:8793",
+  "http://LOCALHOST",
+  "http://[::1]:8793",
+])("allows an explicit loopback sidecar URL: %s", async (baseUrl) => {
+  const fetchFn = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(Response.json({ contractVersion: 1, results: [] }));
+  expect(
+    await searchThreadSidecar({ query: "token", limit: 10, documents, baseUrl, fetchFn }),
+  ).toEqual([]);
+  expect(fetchFn).toHaveBeenCalledOnce();
+});
+
+it.each([
+  "not a URL",
+  "file:///tmp/search",
+  "ftp://127.0.0.1/search",
+  "http://user@127.0.0.1:8793",
+  "http://user:secret@localhost:8793",
+  "http://localhost.example:8793",
+  "http://localhost.:8793",
+  "http://127.0.0.1.example:8793",
+  "http://127.0.0.1@remote.example:8793",
+  "http://2130706433:8793",
+  "http://0177.0.0.1:8793",
+  "http://0x7f000001:8793",
+  "http://127.1:8793",
+  "http://127.000.000.001:8793",
+  "http://192.168.1.10:8793",
+  "http://8.8.8.8:8793",
+  "http://[::ffff:127.0.0.1]:8793",
+  "http://[::ffff:192.168.1.10]:8793",
+  "http://[fe80::1]:8793",
+])("rejects an unsafe sidecar URL before sending documents: %s", async (baseUrl) => {
+  const fetchFn = vi.fn<typeof fetch>();
+  expect(
+    await searchThreadSidecar({ query: "token", limit: 10, documents, baseUrl, fetchFn }),
+  ).toBeNull();
+  expect(fetchFn).not.toHaveBeenCalled();
+});
+
+it("does not follow redirects that could leave loopback", async () => {
+  const fetchFn = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(
+      new Response(null, { status: 302, headers: { location: "https://remote.example" } }),
+    );
+  expect(
+    await searchThreadSidecar({
+      query: "token",
+      limit: 10,
+      documents,
+      baseUrl: "http://127.0.0.1:8793",
+      fetchFn,
+    }),
+  ).toBeNull();
+  expect(fetchFn).toHaveBeenCalledWith(
+    new URL("http://127.0.0.1:8793/v1/search"),
+    expect.objectContaining({ redirect: "manual" }),
+  );
+});
+
 it("fails open on transport, status, and contract errors", async () => {
-  const common = { query: "token", limit: 10, documents, baseUrl: "http://sidecar" };
+  const common = { query: "token", limit: 10, documents, baseUrl: "http://127.0.0.1:8793" };
   expect(
     await searchThreadSidecar({
       ...common,
