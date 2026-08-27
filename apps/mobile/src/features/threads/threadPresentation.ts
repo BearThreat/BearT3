@@ -73,6 +73,21 @@ export function resolveThreadStatus(
     };
   }
 
+  if (
+    thread.latestTurn?.recovery === true &&
+    (thread.session?.status === "running" || thread.session?.status === "starting")
+  ) {
+    return {
+      kind: "working",
+      label: "Recovering",
+      pillClassName: "bg-cyan-500/12 dark:bg-cyan-500/16",
+      textClassName: "text-cyan-700 dark:text-cyan-300",
+      iconColor: "#06b6d4",
+      iconBackground: "rgba(6,182,212,0.22)",
+      pulse: true,
+    };
+  }
+
   if (thread.session?.status === "running") {
     return {
       kind: "working",
@@ -106,6 +121,18 @@ export function resolveThreadStatus(
       iconColor: "#ff453a",
       iconBackground: "rgba(255,69,58,0.22)",
       pulse: false,
+    };
+  }
+
+  if (thread.backgroundLiveness != null) {
+    return {
+      kind: "working",
+      label: thread.backgroundLiveness === "monitoring" ? "Monitoring" : "Working",
+      pillClassName: "bg-sky-500/12 dark:bg-sky-500/16",
+      textClassName: "text-sky-700 dark:text-sky-300",
+      iconColor: "#0a84ff",
+      iconBackground: "rgba(10,132,255,0.22)",
+      pulse: thread.backgroundLiveness === "working",
     };
   }
 

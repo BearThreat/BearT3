@@ -164,6 +164,7 @@ import {
   AlarmClockIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
+  FolderInputIcon,
   GitBranchIcon,
   PaperclipIcon,
   WifiOffIcon,
@@ -183,6 +184,11 @@ import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { useBrowserHistoryStore } from "~/browserHistoryStore";
 import { registerFaviconProjectForThread } from "~/browserFaviconStore";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
+import {
+  latestConversationProjectSuggestion,
+  projectSuggestionMoveInput,
+  resolveSuggestedProject,
+} from "../conversationOrganizer";
 import { NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import {
   useClientSettings,
@@ -2215,6 +2221,24 @@ function ChatViewContent(props: ChatViewProps) {
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const projectSuggestion = useMemo(
+    () => latestConversationProjectSuggestion(threadActivities),
+    [threadActivities],
+  );
+  const [dismissedProjectSuggestionId, setDismissedProjectSuggestionId] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!activeThread?.id || !projectSuggestion) return;
+    const key = `t3:organizer-dismissed:${environmentId}:${activeThread.id}`;
+    setDismissedProjectSuggestionId(window.localStorage.getItem(key));
+  }, [activeThread?.id, environmentId, projectSuggestion]);
+  const dismissProjectSuggestion = useCallback(() => {
+    if (!activeThread?.id || !projectSuggestion) return;
+    const key = `t3:organizer-dismissed:${environmentId}:${activeThread.id}`;
+    window.localStorage.setItem(key, projectSuggestion.activityId);
+    setDismissedProjectSuggestionId(projectSuggestion.activityId);
+  }, [activeThread?.id, environmentId, projectSuggestion]);
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
   const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
   // Native subagent fold: memoized by activity-list identity, shared by the
@@ -4535,6 +4559,45 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void handleSwitchCheckoutToThread();
   }, [gitStatusQuery.data?.hasWorkingTreeChanges, handleSwitchCheckoutToThread]);
+  const suggestedProject = resolveSuggestedProject(allProjects, environmentId, projectSuggestion);
+  const handleAcceptProjectSuggestion = useCallback(async () => {
+    if (!activeThread || !suggestedProject || !projectSuggestion) return;
+    const result = await updateThreadMetadata({
+      environmentId,
+      input: projectSuggestionMoveInput({
+        threadId: activeThread.id,
+        projectId: suggestedProject.id,
+        worktreePath: activeThread.worktreePath,
+      }),
+    });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not move thread",
+            description: chatActionErrorMessage(squashAtomCommandFailure(result)),
+          }),
+        );
+      }
+      return;
+    }
+    dismissProjectSuggestion();
+    toastManager.add(
+      stackedThreadToast({
+        type: "success",
+        title: `Saved in ${suggestedProject.title}`,
+        description: "The thread will keep using its existing workspace.",
+      }),
+    );
+  }, [
+    activeThread,
+    dismissProjectSuggestion,
+    environmentId,
+    projectSuggestion,
+    suggestedProject,
+    updateThreadMetadata,
+  ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const isUrgentSystemItem = (item: ComposerBannerStackItem) =>
       item.urgent === true || item.variant === "error" || item.variant === "warning";
@@ -4544,11 +4607,38 @@ function ChatViewContent(props: ChatViewProps) {
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+    const organizerItems =
+      projectSuggestion &&
+      suggestedProject &&
+      projectSuggestion.activityId !== dismissedProjectSuggestionId &&
+      activeThread?.projectId !== suggestedProject.id
+        ? [
+            {
+              id: `project-suggestion:${projectSuggestion.activityId}`,
+              variant: "info" as const,
+              icon: <FolderInputIcon />,
+              title: `This looks like ${suggestedProject.title}`,
+              description: "Move it there? The workspace will not change.",
+              actions: (
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => void handleAcceptProjectSuggestion()}
+                >
+                  Move
+                </Button>
+              ),
+              dismissLabel: "Keep in current project",
+              onDismiss: dismissProjectSuggestion,
+            },
+          ]
+        : [];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...urgentSystemItems,
         ...backgroundLivenessItems,
         ...calmSystemItems,
+        ...organizerItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
       ];
@@ -4557,6 +4647,7 @@ function ChatViewContent(props: ChatViewProps) {
       ...urgentSystemItems,
       ...backgroundLivenessItems,
       ...calmSystemItems,
+      ...organizerItems,
       ...wokeThreadItems,
       {
         id: `branch-mismatch:${activeBranchMismatchKey}`,
@@ -4602,12 +4693,17 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    dismissedProjectSuggestionId,
+    dismissProjectSuggestion,
+    handleAcceptProjectSuggestion,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
     parkedThreadBannerItem,
+    projectSuggestion,
     showBranchMismatchBanner,
     systemComposerBannerItems,
+    suggestedProject,
     wokeThreadBannerItem,
   ]);
 

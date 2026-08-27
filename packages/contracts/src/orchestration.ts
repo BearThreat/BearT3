@@ -1654,7 +1654,7 @@ export type OrchestrationGetFullThreadDiffInput = typeof OrchestrationGetFullThr
 export const OrchestrationGetFullThreadDiffResult = ThreadTurnDiff;
 export type OrchestrationGetFullThreadDiffResult = typeof OrchestrationGetFullThreadDiffResult.Type;
 
-export const OrchestrationThreadSearchSource = Schema.Literals(["user", "assistant"]);
+export const OrchestrationThreadSearchSource = Schema.Literals(["user", "assistant", "title"]);
 export type OrchestrationThreadSearchSource = typeof OrchestrationThreadSearchSource.Type;
 
 // The server's SQLite client is synchronous and single-connection. Bound both

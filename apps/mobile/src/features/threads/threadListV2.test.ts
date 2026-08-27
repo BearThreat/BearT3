@@ -150,6 +150,40 @@ describe("resolveThreadListV2Status", () => {
       "ready",
     );
   });
+
+  it("keeps recovery and background liveness in the working group", () => {
+    const recovery = makeThread({
+      id: ThreadId.make("recovery"),
+      title: "Recovery",
+      latestTurn: {
+        turnId: TurnId.make("recovery-turn"),
+        state: "running",
+        requestedAt: NOW,
+        startedAt: NOW,
+        completedAt: null,
+        assistantMessageId: null,
+        recovery: true,
+      },
+      session: {
+        threadId: ThreadId.make("recovery"),
+        status: "starting",
+        providerName: "Codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "full-access",
+        activeTurnId: TurnId.make("recovery-turn"),
+        lastError: null,
+        updatedAt: NOW,
+      },
+    });
+    const monitoring = makeThread({
+      id: ThreadId.make("monitoring"),
+      title: "Monitoring",
+      backgroundLiveness: "monitoring",
+    });
+
+    expect(resolveThreadListV2Status(recovery)).toBe("working");
+    expect(resolveThreadListV2Status(monitoring)).toBe("working");
+  });
 });
 
 describe("resolveThreadListV2SwipeActions", () => {

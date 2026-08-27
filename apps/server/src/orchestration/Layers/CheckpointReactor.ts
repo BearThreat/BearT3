@@ -38,6 +38,10 @@ import type { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
+import {
+  resolveConversationProjectSuggestion,
+  shouldRunConversationOrganizer,
+} from "../ConversationOrganizer.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -176,6 +180,61 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
     return project ? [project] : [];
   });
+
+  const produceConversationProjectSuggestion = Effect.fn("produceConversationProjectSuggestion")(
+    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) {
+      const thread = yield* resolveThreadDetail(event.threadId);
+      if (!thread) return;
+
+      const userMessages = thread.messages.filter((message) => message.role === "user");
+      const userMessageCount = userMessages.length;
+      if (!shouldRunConversationOrganizer(userMessageCount)) return;
+
+      const alreadyProduced = thread.activities.some((activity) => {
+        if (activity.kind !== "organizer.project.suggested") return false;
+        const payload = activity.payload;
+        return (
+          payload !== null &&
+          typeof payload === "object" &&
+          "userMessageCount" in payload &&
+          payload.userMessageCount === userMessageCount
+        );
+      });
+      if (alreadyProduced) return;
+
+      // This server owns one environment. Its projection snapshot cannot contain
+      // projects from another environment; the client performs the same check
+      // again before it offers Move.
+      const snapshot = yield* projectionSnapshotQuery.getSnapshot();
+      const suggestion = resolveConversationProjectSuggestion({
+        projects: snapshot.projects.filter((project) => project.deletedAt === null),
+        currentProjectId: thread.projectId,
+        userMessages: userMessages.slice(-5).map((message) => message.text),
+      });
+      if (!suggestion) return;
+
+      const createdAt = event.createdAt;
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: yield* serverCommandId("organizer-project-suggestion"),
+        threadId: thread.id,
+        activity: {
+          id: yield* serverEventId,
+          tone: "info",
+          kind: "organizer.project.suggested",
+          summary: `Suggested project: ${suggestion.title}`,
+          payload: {
+            projectId: suggestion.id,
+            projectTitle: suggestion.title,
+            userMessageCount,
+          },
+          turnId: toTurnId(event.turnId),
+          createdAt,
+        },
+        createdAt,
+      });
+    },
+  );
 
   const isGitWorkspace = (cwd: string) => isGitRepository(cwd);
 
@@ -883,6 +942,7 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+      yield* produceConversationProjectSuggestion(event);
       return;
     }
   });

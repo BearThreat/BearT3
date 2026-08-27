@@ -201,7 +201,9 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
   BotIcon,
+  CameraIcon,
   CircleAlertIcon,
+  ImagePlusIcon,
   PencilRulerIcon,
   type LucideIcon,
   LockIcon,
@@ -969,6 +971,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Refs
   // ------------------------------------------------------------------
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
+  const composerCameraInputRef = useRef<HTMLInputElement>(null);
+  const composerImageInputRef = useRef<HTMLInputElement>(null);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const composerSurfaceRef = useRef<HTMLDivElement>(null);
   const providerInputRejectedRef = useRef(false);
@@ -2413,6 +2417,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
   };
 
+  const openComposerImagePicker = useCallback(() => {
+    composerImageInputRef.current?.click();
+  }, []);
+
+  const openComposerCamera = useCallback(() => {
+    composerCameraInputRef.current?.click();
+  }, []);
+
+  const onComposerImageInputChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const input = event.currentTarget;
+      const files = Array.from(input.files ?? []);
+      // Reset immediately so selecting the same image again still emits a
+      // change event after the first copy has been removed from the draft.
+      input.value = "";
+      if (files.length > 0) {
+        void addComposerImages(files);
+      }
+    },
+    [addComposerImages],
+  );
+
   const removeComposerImage = (imageId: string) => {
     removeComposerImageFromDraft(imageId);
   };
@@ -2684,6 +2710,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       className="mx-auto w-full min-w-0 max-w-3xl"
       data-chat-composer-form="true"
     >
+      <input
+        ref={composerImageInputRef}
+        type="file"
+        accept="image/gif,image/jpeg,image/png,image/webp"
+        multiple
+        className="sr-only"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={onComposerImageInputChange}
+      />
+      <input
+        ref={composerCameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="sr-only"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={onComposerImageInputChange}
+      />
       <div
         className={cn(
           "group rounded-[22px] p-px transition-colors duration-200",
@@ -2849,27 +2895,53 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   : prompt.trim() ||
                     (noProviderAvailable ? "Enable a provider in Settings" : "Ask anything...")}
               </button>
-              <button
-                type="button"
-                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground hover:bg-message-action-hover disabled:opacity-30"
-                disabled={collapsedComposerPrimaryActionDisabled}
-                aria-label={collapsedComposerPrimaryActionLabel}
-                onPointerDown={(event) => event.preventDefault()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  submitComposer();
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path
-                    d="M8 3L8 13M8 3L4 7M8 3L12 7"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full text-secondary-label hover:bg-muted hover:text-foreground"
+                  aria-label="Take a picture"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openComposerCamera();
+                  }}
+                >
+                  <CameraIcon className="size-4" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full text-secondary-label hover:bg-muted hover:text-foreground"
+                  aria-label="Add photos or screenshots"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openComposerImagePicker();
+                  }}
+                >
+                  <ImagePlusIcon className="size-4" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="flex size-8 items-center justify-center rounded-full bg-message-action text-message-action-foreground hover:bg-message-action-hover disabled:opacity-30"
+                  disabled={collapsedComposerPrimaryActionDisabled}
+                  aria-label={collapsedComposerPrimaryActionLabel}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    submitComposer();
+                  }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M8 3L8 13M8 3L4 7M8 3L12 7"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
             </div>
           ) : null}
 
@@ -3136,6 +3208,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )}
             >
               <div className="-m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <ComposerControl
+                  type="button"
+                  aria-label="Take a picture"
+                  className="shrink-0"
+                  onClick={openComposerCamera}
+                >
+                  <ComposerControlIcon icon={CameraIcon} />
+                  <span className="max-sm:hidden">Camera</span>
+                </ComposerControl>
+                <ComposerControl
+                  type="button"
+                  aria-label="Add photos or screenshots"
+                  className="shrink-0"
+                  onClick={openComposerImagePicker}
+                >
+                  <ComposerControlIcon icon={ImagePlusIcon} />
+                  <span className="max-sm:hidden">Photos</span>
+                </ComposerControl>
                 {noProviderAvailable ? (
                   <Button
                     type="button"

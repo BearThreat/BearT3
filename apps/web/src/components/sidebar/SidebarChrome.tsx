@@ -2,12 +2,14 @@ import {
   ArrowLeftIcon,
   ChartNoAxesColumnIcon,
   GitPullRequestIcon,
+  GaugeIcon,
   SettingsIcon,
 } from "lucide-react";
 import { memo, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
+import { useHostOptimization } from "../../hooks/useHostOptimization";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
 import {
@@ -120,6 +122,7 @@ function T3Wordmark() {
 export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
+  const hostOptimization = useHostOptimization();
   const currentFooterPage = useLocation({
     select: (location) =>
       location.pathname === "/usage"
@@ -174,6 +177,27 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
           </SidebarMenuItem>
         ) : (
           <>
+            {hostOptimization.available ? (
+              <SidebarMenuItem className="shrink-0">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <SidebarMenuButton
+                        aria-label="Speed up Blackbear"
+                        disabled={hostOptimization.isRunning}
+                        onClick={() => void hostOptimization.run()}
+                        size="icon"
+                      >
+                        <GaugeIcon className={hostOptimization.isRunning ? "animate-pulse" : ""} />
+                      </SidebarMenuButton>
+                    }
+                  />
+                  <TooltipPopup side="top">
+                    {hostOptimization.isRunning ? "Optimizing Blackbear…" : "Speed up Blackbear"}
+                  </TooltipPopup>
+                </Tooltip>
+              </SidebarMenuItem>
+            ) : null}
             <SidebarMenuItem className="shrink-0">
               <Tooltip>
                 <TooltipTrigger

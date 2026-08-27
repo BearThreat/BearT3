@@ -84,6 +84,7 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as HostOptimization from "./hostOptimization.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -1531,6 +1532,16 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.serverGetHostOptimizationCapability]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetHostOptimizationCapability,
+            Effect.promise(() => HostOptimization.probeHostOptimizationCapability()),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverOptimizeHost]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverOptimizeHost, HostOptimization.optimizeHost(), {
+            "rpc.aggregate": "server",
+          }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
           observeRpcEffect(
             WS_METHODS.serverDiscoverSourceControl,

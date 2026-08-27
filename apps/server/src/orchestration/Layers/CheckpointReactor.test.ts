@@ -1257,4 +1257,66 @@ describe("CheckpointReactor", () => {
     );
     expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
   });
+
+  it("produces a project suggestion at a message milestone without moving the thread", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const targetWorkspace = NodePath.join(harness.cwd, "mobile-thread-list");
+    NodeFS.mkdirSync(targetWorkspace);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-create-organizer-target"),
+        projectId: asProjectId("project-mobile"),
+        title: "Mobile Thread List",
+        workspaceRoot: targetWorkspace,
+        defaultModelSelection: null,
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-organizer"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("message-organizer-1"),
+          role: "user",
+          text: "Continue the Mobile Thread List work.",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt,
+      }),
+    );
+
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-organizer"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-organizer"),
+      payload: { state: "completed" },
+    });
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "organizer.project.suggested"),
+    );
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    const suggestion = thread?.activities.find(
+      (activity) => activity.kind === "organizer.project.suggested",
+    );
+
+    expect(thread?.projectId).toBe(asProjectId("project-1"));
+    expect(suggestion?.payload).toMatchObject({
+      projectId: asProjectId("project-mobile"),
+      projectTitle: "Mobile Thread List",
+      userMessageCount: 1,
+    });
+  });
 });

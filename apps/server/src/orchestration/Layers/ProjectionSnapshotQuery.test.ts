@@ -1702,6 +1702,31 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       `;
 
       yield* sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES (
+          'event-search-title-history',
+          'thread',
+          'thread-active',
+          100,
+          'thread.meta-updated',
+          '2026-05-01T00:00:17.000Z',
+          'server',
+          '{"threadId":"thread-active","title":"Current title","previousTitle":"Historical routing title","updatedAt":"2026-05-01T00:00:17.000Z"}',
+          '{}'
+        )
+      `;
+
+      yield* sql`
         INSERT INTO projection_thread_messages (
           message_id,
           thread_id,
@@ -1822,6 +1847,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
       const assistant = yield* snapshotQuery.searchThreads({ query: "FINAL NEEDLE" });
       assert.equal(assistant.matches[0]?.source, "assistant");
+
+      const previousTitle = yield* snapshotQuery.searchThreads({ query: "historical routing" });
+      assert.equal(previousTitle.matches[0]?.source, "title");
+      assert.match(previousTitle.matches[0]?.snippet ?? "", /Historical routing title/);
 
       const deduped = yield* snapshotQuery.searchThreads({ query: "needle" });
       assert.deepStrictEqual(

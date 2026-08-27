@@ -756,6 +756,19 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    hostOptimizationCapability: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:host-optimization-capability",
+      tag: WS_METHODS.serverGetHostOptimizationCapability,
+      staleTimeMs: 30_000,
+    }),
+    optimizeHost: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:optimize-host",
+      tag: WS_METHODS.serverOptimizeHost,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,

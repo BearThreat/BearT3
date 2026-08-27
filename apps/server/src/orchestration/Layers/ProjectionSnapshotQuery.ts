@@ -797,7 +797,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadSearchRow,
     execute: ({ pattern, limit }) =>
       sql`
-        WITH ranked AS (
+        WITH matches AS (
           SELECT
             threads.thread_id AS thread_id,
             threads.project_id AS project_id,
@@ -811,17 +811,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               WHEN 'user' THEN 0
               ELSE 1
             END AS match_rank,
-            threads.updated_at AS thread_updated_at,
-            ROW_NUMBER() OVER (
-              PARTITION BY threads.thread_id
-              ORDER BY
-                CASE messages.role
-                  WHEN 'user' THEN 0
-                  ELSE 1
-                END ASC,
-                messages.created_at DESC,
-                messages.message_id ASC
-            ) AS thread_match_rank
+            threads.updated_at AS thread_updated_at
           FROM projection_thread_messages AS messages
           INNER JOIN projection_threads AS threads
             ON threads.thread_id = messages.thread_id
@@ -843,6 +833,37 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               )
             )
             AND messages.text LIKE ${pattern} ESCAPE '!'
+          UNION ALL
+
+          SELECT
+            threads.thread_id AS thread_id,
+            threads.project_id AS project_id,
+            'title' AS source,
+            json_extract(events.payload_json, '$.previousTitle') AS match_text,
+            events.occurred_at AS message_created_at,
+            2 AS match_rank,
+            threads.updated_at AS thread_updated_at
+          FROM orchestration_events AS events
+          INNER JOIN projection_threads AS threads
+            ON threads.thread_id = events.stream_id
+          INNER JOIN projection_projects AS projects
+            ON projects.project_id = threads.project_id
+          WHERE events.event_type = 'thread.meta-updated'
+            AND json_type(events.payload_json, '$.previousTitle') = 'text'
+            AND json_extract(events.payload_json, '$.previousTitle') LIKE ${pattern} ESCAPE '!'
+            AND threads.deleted_at IS NULL
+            AND threads.archived_at IS NULL
+            AND projects.deleted_at IS NULL
+        ), ranked AS (
+          SELECT
+            matches.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY matches.thread_id
+              ORDER BY
+                matches.match_rank ASC,
+                matches.message_created_at DESC
+            ) AS thread_match_rank
+          FROM matches
         )
         SELECT
           thread_id AS "threadId",

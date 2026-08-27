@@ -79,7 +79,7 @@ export function reduceCommandPaletteUiState(
 }
 
 export interface CommandPaletteThreadContentMatch {
-  readonly source: "user" | "assistant";
+  readonly source: "user" | "assistant" | "title";
   readonly snippet: string;
   readonly query: string;
 }

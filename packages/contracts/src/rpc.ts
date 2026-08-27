@@ -150,6 +150,9 @@ import {
   PreviewAutomationStreamEvent,
 } from "./previewAutomation.ts";
 import {
+  HostOptimizationCapability,
+  HostOptimizationError,
+  HostOptimizationResult,
   ServerConfigStreamEvent,
   ServerConfig,
   ServerProviderUpdateError,
@@ -260,6 +263,8 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  serverGetHostOptimizationCapability: "server.getHostOptimizationCapability",
+  serverOptimizeHost: "server.optimizeHost",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
@@ -382,6 +387,21 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   payload: Schema.Struct({ patch: ServerSettingsPatch }),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerGetHostOptimizationCapabilityRpc = Rpc.make(
+  WS_METHODS.serverGetHostOptimizationCapability,
+  {
+    payload: Schema.Struct({}),
+    success: HostOptimizationCapability,
+    error: EnvironmentAuthorizationError,
+  },
+);
+
+export const WsServerOptimizeHostRpc = Rpc.make(WS_METHODS.serverOptimizeHost, {
+  payload: Schema.Struct({}),
+  success: HostOptimizationResult,
+  error: Schema.Union([HostOptimizationError, EnvironmentAuthorizationError]),
 });
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -984,6 +1004,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsServerGetHostOptimizationCapabilityRpc,
+  WsServerOptimizeHostRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,

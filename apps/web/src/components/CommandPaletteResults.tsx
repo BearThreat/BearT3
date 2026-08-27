@@ -69,14 +69,19 @@ function ThreadContentMatch(props: {
   match: NonNullable<CommandPaletteActionItem["threadContentMatch"]>;
 }) {
   const isUser = props.match.source === "user";
+  const isTitle = props.match.source === "title";
   return (
     <span className="truncate text-xs text-muted-foreground/85">
-      <span className={isUser ? "text-blue-400" : "text-emerald-400"}>
-        {isUser ? "You:" : "Agent:"}
+      <span className={isUser ? "text-blue-400" : isTitle ? "text-amber-400" : "text-emerald-400"}>
+        {threadContentMatchLabel(props.match.source)}
       </span>{" "}
       <HighlightedSearchText text={props.match.snippet} query={props.match.query} />
     </span>
   );
+}
+
+export function threadContentMatchLabel(source: "user" | "assistant" | "title"): string {
+  return source === "user" ? "You:" : source === "title" ? "Previously titled:" : "Agent:";
 }
 
 interface CommandPaletteResultsProps {

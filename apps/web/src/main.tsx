@@ -4,6 +4,7 @@ import { ClerkProvider } from "@clerk/react";
 import { passkeys } from "@clerk/electron/passkeys";
 import { ClerkProvider as ElectronClerkProvider } from "@clerk/electron/react";
 import { createHashHistory, createBrowserHistory } from "@tanstack/react-router";
+import "katex/dist/katex.min.css";
 
 import "./index.css";
 

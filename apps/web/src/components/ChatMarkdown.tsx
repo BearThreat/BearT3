@@ -40,9 +40,11 @@ import type { Components, Options as ReactMarkdownOptions } from "react-markdown
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
+import rehypeKatex from "rehype-katex";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { remarkGithubAlerts } from "../markdown-github-alerts";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
 import { CHAT_FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
@@ -189,13 +191,14 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   },
 } satisfies Parameters<typeof rehypeSanitize>[0];
 
-const CHAT_MARKDOWN_REMARK_PLUGINS = [
+export const CHAT_MARKDOWN_REMARK_PLUGINS: NonNullable<ReactMarkdownOptions["remarkPlugins"]> = [
   remarkGfm,
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkPreserveCodeMeta,
   remarkTagInlineCode,
-] satisfies NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
+  remarkMath,
+];
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkGfm,
@@ -204,12 +207,70 @@ const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkBreaks,
   remarkPreserveCodeMeta,
   remarkTagInlineCode,
+  remarkMath,
 ] satisfies NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
 
-const CHAT_MARKDOWN_REHYPE_PLUGINS = [
-  rehypeRaw,
-  [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
-] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+export const CHAT_MARKDOWN_REHYPE_PLUGINS = [rehypeKatex] satisfies NonNullable<
+  ReactMarkdownOptions["rehypePlugins"]
+>;
+
+export const CHAT_MARKDOWN_REHYPE_PLUGINS_WITH_RAW_HTML: NonNullable<
+  ReactMarkdownOptions["rehypePlugins"]
+> = [rehypeRaw, [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA], rehypeKatex];
+
+const NUMERIC_CURRENCY = /(?<!\\)\$([+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+))/g;
+
+function protectCurrencyInText(source: string): string {
+  return source.replace(NUMERIC_CURRENCY, (match, _amount, offset: number) => {
+    const after = source.slice(offset + match.length);
+    if (after.startsWith("**") || after.startsWith("__")) return `\\${match}`;
+    const immediate = after[0] ?? "";
+    if (immediate === "$") return match;
+    if (/[A-Za-z\\]/.test(immediate)) return match;
+    const operator = after.match(/^\s*([+\-*/=^_])/);
+    if (operator && /(?<!\\)\$/.test(after.slice(operator[0].length))) return match;
+    return `\\${match}`;
+  });
+}
+
+function protectCurrencyOutsideInlineCode(line: string): string {
+  let cursor = 0;
+  let output = "";
+  while (cursor < line.length) {
+    const opening = line.indexOf("`", cursor);
+    if (opening < 0) return output + protectCurrencyInText(line.slice(cursor));
+    let runLength = 1;
+    while (line[opening + runLength] === "`") runLength += 1;
+    const delimiter = "`".repeat(runLength);
+    const closing = line.indexOf(delimiter, opening + runLength);
+    if (closing < 0) return output + protectCurrencyInText(line.slice(cursor));
+    output += protectCurrencyInText(line.slice(cursor, opening));
+    output += line.slice(opening, closing + runLength);
+    cursor = closing + runLength;
+  }
+  return output;
+}
+
+/** Keep numeric prices literal while retaining dollar-delimited math. */
+export function protectCurrencyFromInlineMath(source: string): string {
+  let fence: { marker: string; length: number } | null = null;
+  return source
+    .split(/(?<=\n)/)
+    .map((line) => {
+      const match = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+      const marker = match?.[1];
+      if (fence) {
+        if (marker?.[0] === fence.marker && marker.length >= fence.length) fence = null;
+        return line;
+      }
+      if (marker) {
+        fence = { marker: marker[0]!, length: marker.length };
+        return line;
+      }
+      return protectCurrencyOutsideInlineCode(line);
+    })
+    .join("");
+}
 
 /** GitHub's own five alert kinds, in its colors: the glyph names the urgency, the title says it. */
 const GITHUB_ALERT_PRESENTATIONS: Record<
@@ -1798,12 +1859,14 @@ function ChatMarkdown({
         remarkPlugins={
           lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS
         }
-        rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
+        rehypePlugins={
+          parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS_WITH_RAW_HTML : CHAT_MARKDOWN_REHYPE_PLUGINS
+        }
         skipHtml={false}
         components={markdownComponents}
         urlTransform={markdownUrlTransform}
       >
-        {text}
+        {protectCurrencyFromInlineMath(text)}
       </ReactMarkdown>
     </div>
   );

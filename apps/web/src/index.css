@@ -1723,6 +1723,26 @@ code {
   display: inline-block;
 }
 
+.chat-markdown .katex-display {
+  max-width: 100%;
+  margin: 0.9rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.45rem 0.1rem;
+  color: var(--foreground);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--border) 78%, transparent) transparent;
+}
+
+.chat-markdown .katex-display > .katex {
+  min-width: max-content;
+  font-size: 1.08em;
+}
+
+.chat-markdown :not(.katex-display) > .katex {
+  color: var(--foreground);
+}
+
 .chat-markdown a {
   color: var(--info-foreground);
   text-decoration: none;

@@ -126,7 +126,10 @@ export function resolveThreadListV2Enabled(input: {
 }
 
 export function resolveThreadListV2Status(
-  thread: Pick<EnvironmentThreadShell, "hasPendingApprovals" | "hasPendingUserInput" | "session">,
+  thread: Pick<
+    EnvironmentThreadShell,
+    "hasPendingApprovals" | "hasPendingUserInput" | "session" | "latestTurn" | "backgroundLiveness"
+  >,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals) {
     return "approval";
@@ -134,11 +137,20 @@ export function resolveThreadListV2Status(
   if (thread.hasPendingUserInput) {
     return "input";
   }
+  if (
+    thread.latestTurn?.recovery === true &&
+    (thread.session?.status === "running" || thread.session?.status === "starting")
+  ) {
+    return "working";
+  }
   if (thread.session?.status === "running" || thread.session?.status === "starting") {
     return "working";
   }
   if (thread.session?.status === "error") {
     return "failed";
+  }
+  if (thread.backgroundLiveness != null) {
+    return "working";
   }
   return "ready";
 }

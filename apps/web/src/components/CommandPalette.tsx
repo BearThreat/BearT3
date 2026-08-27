@@ -36,6 +36,7 @@ import {
   ArrowLeftIcon,
   CornerLeftUpIcon,
   FileSearchIcon,
+  GaugeIcon,
   FolderIcon,
   FolderPlusIcon,
   LinkIcon,
@@ -62,6 +63,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useHostOptimization } from "../hooks/useHostOptimization";
 import { useClientSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { readLocalApi } from "../localApi";
@@ -572,6 +574,7 @@ function OpenCommandPaletteDialog(props: {
   const isActionsOnly = deferredQuery.startsWith(">");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const clientSettings = useClientSettings();
+  const hostOptimization = useHostOptimization();
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -623,7 +626,7 @@ function OpenCommandPaletteDialog(props: {
     () =>
       new Map(
         threadSearch.matches.flatMap((match) =>
-          match.source === "user" || match.source === "assistant"
+          match.source === "user" || match.source === "assistant" || match.source === "title"
             ? [[threadSearchMatchKey(match), match] as const]
             : [],
         ),
@@ -1440,6 +1443,19 @@ function OpenCommandPaletteDialog(props: {
   ]);
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+
+  if (hostOptimization.available) {
+    actionItems.push({
+      kind: "action",
+      value: "action:optimize-blackbear",
+      searchTerms: ["speed up", "optimize", "performance", "blackbear", "cpu", "temperature"],
+      title: hostOptimization.isRunning ? "Optimizing Blackbear…" : "Speed up Blackbear",
+      description: "Prioritize interactive work and repair runaway background helpers",
+      disabled: hostOptimization.isRunning,
+      icon: <GaugeIcon className={ITEM_ICON_CLASS} />,
+      run: hostOptimization.run,
+    });
+  }
 
   if (projects.length > 0) {
     const activeProjectTitle =

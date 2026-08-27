@@ -654,3 +654,36 @@ export class ServerSelfUpdateError extends Schema.TaggedErrorClass<ServerSelfUpd
     return `Server update failed: ${this.reason}`;
   }
 }
+
+export const HostOptimizationCapability = Schema.Struct({
+  available: Schema.Boolean,
+});
+export type HostOptimizationCapability = typeof HostOptimizationCapability.Type;
+
+export const HostOptimizationMetrics = Schema.Struct({
+  cpuPressureAvg10: Schema.NullOr(Schema.Number),
+  ioPressureAvg10: Schema.NullOr(Schema.Number),
+  temperatureC: Schema.NullOr(Schema.Number),
+});
+export type HostOptimizationMetrics = typeof HostOptimizationMetrics.Type;
+
+export const HostOptimizationResult = Schema.Struct({
+  ok: Schema.Literal(true),
+  changed: Schema.Boolean,
+  actions: Schema.Struct({
+    transcriptionPriorityUpdated: Schema.Boolean,
+    bluemanRestarted: Schema.Boolean,
+  }),
+  before: HostOptimizationMetrics,
+  after: HostOptimizationMetrics,
+});
+export type HostOptimizationResult = typeof HostOptimizationResult.Type;
+
+export class HostOptimizationError extends Schema.TaggedErrorClass<HostOptimizationError>()(
+  "HostOptimizationError",
+  { reason: TrimmedNonEmptyString },
+) {
+  override get message(): string {
+    return `Host optimization failed: ${this.reason}`;
+  }
+}
